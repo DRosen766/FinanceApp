@@ -30,7 +30,10 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
 
 - **`src/server/`** holds everything that touches secrets, and every file starts with `import "server-only"`. Client Components must never import from it.
   - `plaid.ts` is the **only** place the Plaid client exists, and it is never exported. Each exported function wraps one allowed endpoint. `plaid.test.ts` asserts the exact export list, so adding an endpoint deliberately fails that test and forces a security review. Log Plaid failures only through `describePlaidError()`, because raw axios errors contain the `PLAID-SECRET` header and the access token.
-  - `db.ts` is the SQLite store (`web/data/finance.db`, gitignored, file mode 0600). The `items` table holds AES-256-GCM-encrypted access tokens from `crypto.ts`. The Plaid `item_id` is used as additional authenticated data (AAD), so a token's ciphertext only decrypts on its own row. Account data is fetched live, never stored. The future MCP server will read this same store.
+    - Allowed endpoints today: `/link/token/create`, `/item/public_token/exchange`, `/accounts/get` and `/investments/holdings/get`.
+  - `db.ts` is the SQLite store (`web/data/finance.db`, gitignored, file mode 0600). The `items` table holds AES-256-GCM-encrypted access tokens from `crypto.ts`. The Plaid `item_id` is used as additional authenticated data (AAD), so a token's ciphertext only decrypts on its own row. Account and holdings data are fetched live, never stored. The future MCP server will read this same store.
+    - The browser only ever sees the internal row `id` of an item, never Plaid ids or tokens.
+    - The default DB path is built from runtime values (`defaultDbPath()`) so Turbopack's file tracing can't pull the live database into the build output. Don't turn it back into a literal `path.join(process.cwd(), "data", ...)`.
   - `env.ts` validates environment variables lazily with zod. Error messages name the variable, never its value.
 - **Auth uses two layers:**
   - `src/proxy.ts` makes an optimistic check: it unseals the iron-session cookie and redirects to `/login`, or returns 401 for `/api/*`.
@@ -42,6 +45,18 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   2. Link returns a `public_token`, which goes to `POST /api/plaid/exchange`.
   3. The server exchanges it and stores the encrypted access token, then returns `{ok:true}`.
   4. The dashboard (`app/page.tsx`, a server component) decrypts the tokens and calls `/accounts/get`.
+  - New links request `products: [transactions]` with `optional_products: [investments]`.
+  - **Update mode:** `<LinkButton itemId={id}>` sends `{itemId}` to `/api/plaid/link-token`. The server creates an update-mode token with `additional_consented_products: [investments]` and account selection turned on, which adds permission to an existing link. The access token doesn't change, so update mode skips `/exchange`.
+- **Positions** (`app/positions/page.tsx`) calls `/investments/holdings/get` for each item, and `src/lib/positions.ts` does the gain and total math as pure functions. Error codes `ADDITIONAL_CONSENT_REQUIRED` and `NO_INVESTMENT_ACCOUNTS` render an "Enable positions" button that opens update mode.
+
+## Worktree dev setup
+
+A new worktree has no `.env.local` or database. Symlink the main checkout's copies rather than copying the secrets:
+```bash
+cd ../FinanceApp-<feature>/web && npm ci
+ln -s ../../FinanceApp/web/.env.local .env.local && ln -s ../../FinanceApp/web/data data
+```
+`web/.gitignore` uses `/data` with no trailing slash, so the symlink is ignored too.
 
 ## Git workflow (required)
 

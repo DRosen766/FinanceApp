@@ -6,6 +6,8 @@
   --border: #e4e4e4;
   --accent: #1f5eff;
   --error: #c62828;
+  --gain: #1b7f3b;
+  --loss: #c62828;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -17,6 +19,8 @@
     --border: #2c2c2f;
     --accent: #6b93ff;
     --error: #ef7a7a;
+    --gain: #5fd08a;
+    --loss: #ef7a7a;
   }
 }
 
@@ -72,3 +76,15 @@ th { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
 .error { color: var(--error); margin: 4px 0 0; }
+
+.nav { margin-bottom: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.nav a { color: var(--muted); text-decoration: none; font-weight: 500; }
+.nav a[aria-current="page"] { color: var(--fg); }
+.nav a:hover { color: var(--fg); }
+
+h3 { margin: 16px 0 4px; font-size: 1rem; }
+.account + .account { margin-top: 20px; }
+.totals { margin: 4px 0 8px; }
+.table-scroll { overflow-x: auto; }
+.gain { color: var(--gain); }
+.loss { color: var(--loss); }
