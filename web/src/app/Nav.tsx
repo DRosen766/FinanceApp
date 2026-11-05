@@ -1,16 +1,21 @@
 import Link from "next/link";
 import { logout } from "./login/actions";
 
-export function Nav({ current }: { current: "accounts" | "positions" }) {
+const LINKS = [
+  { key: "accounts", href: "/", label: "Accounts" },
+  { key: "positions", href: "/positions", label: "Positions" },
+  { key: "transactions", href: "/transactions", label: "Transactions" },
+] as const;
+
+export function Nav({ current }: { current: (typeof LINKS)[number]["key"] }) {
   return (
     <nav className="row nav">
       <div className="row">
-        <Link href="/" aria-current={current === "accounts" ? "page" : undefined}>
-          Accounts
-        </Link>
-        <Link href="/positions" aria-current={current === "positions" ? "page" : undefined}>
-          Positions
-        </Link>
+        {LINKS.map((l) => (
+          <Link key={l.key} href={l.href} aria-current={current === l.key ? "page" : undefined}>
+            {l.label}
+          </Link>
+        ))}
       </div>
       <form action={logout}>
         <button type="submit" className="secondary">

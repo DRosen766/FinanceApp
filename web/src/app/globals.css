@@ -89,3 +89,27 @@ h3 { margin: 16px 0 4px; font-size: 1rem; }
 .gain { color: var(--gain); }
 .loss { color: var(--loss); }
 .footnote { margin-top: 20px; font-size: 0.9rem; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.filters label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.filters label.grow { flex: 1 1 200px; }
+.filters select, .filters input { min-width: 0; }
+select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.nowrap { white-space: nowrap; }
+.pager { margin-top: 12px; }
+.pager a { color: var(--accent); text-decoration: none; }

@@ -53,6 +53,8 @@ export async function createLinkToken(opts: { accessToken?: string } = {}): Prom
           ...base,
           products: [Products.Transactions],
           optional_products: [Products.Investments],
+          // Max history; only applies when an Item is created (existing Items keep theirs).
+          transactions: { days_requested: 730 },
         },
   );
   return res.data.link_token;
@@ -155,6 +157,113 @@ export async function getHoldings(
       };
     }),
   };
+}
+
+export type SyncedAccount = {
+  plaidAccountId: string;
+  name: string;
+  mask: string | null;
+  type: string;
+  subtype: string | null;
+};
+
+export type SyncedTransaction = {
+  plaidTransactionId: string;
+  plaidAccountId: string;
+  date: string;
+  authorizedDate: string | null;
+  name: string;
+  merchantName: string | null;
+  /** Plaid convention: positive = money out of the account, negative = money in. */
+  amount: number;
+  currency: string | null;
+  pending: boolean;
+  category: string | null;
+  categoryDetailed: string | null;
+  paymentChannel: string | null;
+};
+
+export type TransactionSyncResult = {
+  added: SyncedTransaction[];
+  modified: SyncedTransaction[];
+  removed: string[];
+  accounts: SyncedAccount[];
+  nextCursor: string;
+  status: string;
+};
+
+const SYNC_PAGE_SIZE = 500;
+const SYNC_MAX_RESTARTS = 3;
+
+type PlaidTransaction = Awaited<ReturnType<PlaidApi["transactionsSync"]>>["data"]["added"][number];
+
+// Narrowing is deliberate: location, payment_meta, original_description, counterparties and
+// account_owner are dropped so they are never stored or rendered.
+function narrowTransaction(t: PlaidTransaction): SyncedTransaction {
+  return {
+    plaidTransactionId: t.transaction_id,
+    plaidAccountId: t.account_id,
+    date: t.date,
+    authorizedDate: t.authorized_date ?? null,
+    name: t.name,
+    merchantName: t.merchant_name ?? null,
+    amount: t.amount,
+    currency: t.iso_currency_code ?? t.unofficial_currency_code ?? null,
+    pending: t.pending,
+    category: t.personal_finance_category?.primary ?? null,
+    categoryDetailed: t.personal_finance_category?.detailed ?? null,
+    paymentChannel: t.payment_channel ?? null,
+  };
+}
+
+/**
+ * Wraps /transactions/sync (read-only). Pages until has_more is false. Per Plaid's docs, if
+ * TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION occurs, the whole loop restarts from the
+ * cursor it began with (not from the page that failed).
+ */
+export async function syncTransactions(
+  accessToken: string,
+  cursor: string | null,
+): Promise<TransactionSyncResult> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const out: TransactionSyncResult = {
+        added: [],
+        modified: [],
+        removed: [],
+        accounts: [],
+        nextCursor: cursor ?? "",
+        status: "",
+      };
+      let pageCursor = cursor ?? undefined;
+      for (;;) {
+        const res = await plaid().transactionsSync({
+          access_token: accessToken,
+          cursor: pageCursor,
+          count: SYNC_PAGE_SIZE,
+        });
+        const d = res.data;
+        out.added.push(...d.added.map(narrowTransaction));
+        out.modified.push(...d.modified.map(narrowTransaction));
+        out.removed.push(...d.removed.map((r) => r.transaction_id));
+        out.accounts = d.accounts.map((a) => ({
+          plaidAccountId: a.account_id,
+          name: a.name,
+          mask: a.mask,
+          type: a.type,
+          subtype: a.subtype ?? null,
+        }));
+        out.nextCursor = d.next_cursor;
+        out.status = d.transactions_update_status;
+        if (!d.has_more) return out;
+        pageCursor = d.next_cursor;
+      }
+    } catch (err) {
+      const mutated =
+        describePlaidError(err).errorCode === "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION";
+      if (!mutated || attempt >= SYNC_MAX_RESTARTS) throw err;
+    }
+  }
 }
 
 /**
