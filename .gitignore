@@ -1,0 +1,19 @@
+# Secrets & environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+
+# Local data (may contain real financial data)
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
