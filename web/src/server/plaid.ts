@@ -29,14 +29,32 @@ function plaid(): PlaidApi {
 // Single-user app: one stable, non-identifying user id.
 const CLIENT_USER_ID = "financeapp-owner";
 
-export async function createLinkToken(): Promise<string> {
-  const res = await plaid().linkTokenCreate({
+/**
+ * New link: Transactions, plus Investments where the institution supports it.
+ * Update mode (accessToken given): re-opens Link for an existing Item to grant Investments
+ * consent and let the user add accounts; the access token itself does not change.
+ */
+export async function createLinkToken(opts: { accessToken?: string } = {}): Promise<string> {
+  const base = {
     user: { client_user_id: CLIENT_USER_ID },
     client_name: "FinanceApp",
-    products: [Products.Transactions],
     country_codes: [CountryCode.Us],
     language: "en",
-  });
+  };
+  const res = await plaid().linkTokenCreate(
+    opts.accessToken
+      ? {
+          ...base,
+          access_token: opts.accessToken,
+          additional_consented_products: [Products.Investments],
+          update: { account_selection_enabled: true },
+        }
+      : {
+          ...base,
+          products: [Products.Transactions],
+          optional_products: [Products.Investments],
+        },
+  );
   return res.data.link_token;
 }
 
@@ -79,6 +97,64 @@ export async function getAccounts(accessToken: string): Promise<Account[]> {
       currency: a.balances.iso_currency_code ?? a.balances.unofficial_currency_code,
     },
   }));
+}
+
+export type InvestmentAccount = {
+  id: string;
+  name: string;
+  mask: string | null;
+  subtype: string | null;
+  balance: number | null;
+};
+
+export type Holding = {
+  accountId: string;
+  ticker: string | null;
+  name: string;
+  securityType: string | null;
+  isCash: boolean;
+  quantity: number;
+  price: number;
+  priceAsOf: string | null;
+  value: number;
+  costBasis: number | null;
+  currency: string | null;
+};
+
+/** Wraps /investments/holdings/get (read-only). Returns a narrowed, joined shape. */
+export async function getHoldings(
+  accessToken: string,
+): Promise<{ accounts: InvestmentAccount[]; holdings: Holding[] }> {
+  const res = await plaid().investmentsHoldingsGet({ access_token: accessToken });
+  const securities = new Map(res.data.securities.map((s) => [s.security_id, s]));
+  const holdingAccountIds = new Set(res.data.holdings.map((h) => h.account_id));
+  return {
+    accounts: res.data.accounts
+      .filter((a) => a.type === "investment" || holdingAccountIds.has(a.account_id))
+      .map((a) => ({
+        id: a.account_id,
+        name: a.name,
+        mask: a.mask,
+        subtype: a.subtype ?? null,
+        balance: a.balances.current,
+      })),
+    holdings: res.data.holdings.map((h) => {
+      const s = securities.get(h.security_id);
+      return {
+        accountId: h.account_id,
+        ticker: s?.ticker_symbol ?? null,
+        name: s?.name ?? "Unknown security",
+        securityType: s?.type ?? null,
+        isCash: s?.is_cash_equivalent === true,
+        quantity: h.quantity,
+        price: h.institution_price,
+        priceAsOf: h.institution_price_as_of ?? null,
+        value: h.institution_value,
+        costBasis: h.cost_basis,
+        currency: h.iso_currency_code ?? h.unofficial_currency_code,
+      };
+    }),
+  };
 }
 
 /**

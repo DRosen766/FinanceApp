@@ -6,11 +6,19 @@ import { decrypt, encrypt, parseKey } from "./crypto";
 import { env } from "./env";
 
 type Db = InstanceType<typeof Database>;
+
+// Built from runtime values on purpose: a literal path.join(process.cwd(), "data", ...) is
+// statically traced by Turbopack, which would pull the live database (encrypted tokens)
+// into the build's file traces, and fails outright when data/ is a symlink.
+const DEFAULT_DB_SEGMENTS = ["data", "finance.db"];
+function defaultDbPath(): string {
+  return path.join(/* turbopackIgnore: true */ process.cwd(), ...DEFAULT_DB_SEGMENTS);
+}
 let db: Db | undefined;
 
 function getDb(): Db {
   if (db) return db;
-  const file = env().DATABASE_PATH ?? path.join(process.cwd(), "data", "finance.db");
+  const file = env().DATABASE_PATH ?? defaultDbPath();
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   db = new Database(file);
   chmodSync(file, 0o600);
@@ -42,20 +50,39 @@ export function saveItem(plaidItemId: string, accessToken: string, institutionNa
 }
 
 export type StoredItem = {
+  /** Internal row id. The only item identifier that may be sent to the browser. */
+  id: number;
   plaidItemId: string;
   institutionName: string | null;
   accessToken: string;
 };
 
-/** Decrypted items. Server-side only; never pass the result to a Client Component. */
-export function listItems(): StoredItem[] {
-  const rows = getDb()
-    .prepare(`SELECT plaid_item_id, institution_name, access_token_enc FROM items ORDER BY id`)
-    .all() as { plaid_item_id: string; institution_name: string | null; access_token_enc: Buffer }[];
-  const k = key();
-  return rows.map((r) => ({
+type ItemRow = {
+  id: number;
+  plaid_item_id: string;
+  institution_name: string | null;
+  access_token_enc: Buffer;
+};
+
+const SELECT_ITEMS = `SELECT id, plaid_item_id, institution_name, access_token_enc FROM items`;
+
+function toStoredItem(r: ItemRow, k: Buffer): StoredItem {
+  return {
+    id: r.id,
     plaidItemId: r.plaid_item_id,
     institutionName: r.institution_name,
     accessToken: decrypt(r.access_token_enc, k, r.plaid_item_id),
-  }));
+  };
+}
+
+/** Decrypted items. Server-side only; never pass the result to a Client Component. */
+export function listItems(): StoredItem[] {
+  const rows = getDb().prepare(`${SELECT_ITEMS} ORDER BY id`).all() as ItemRow[];
+  const k = key();
+  return rows.map((r) => toStoredItem(r, k));
+}
+
+export function getItem(id: number): StoredItem | null {
+  const row = getDb().prepare(`${SELECT_ITEMS} WHERE id = ?`).get(id) as ItemRow | undefined;
+  return row ? toStoredItem(row, key()) : null;
 }

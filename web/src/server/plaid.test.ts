@@ -5,7 +5,13 @@ describe("plaid read-only allowlist", () => {
   it("exports only the approved functions (and never the raw client)", () => {
     // Adding to this list is a security review event: only read-only endpoints are allowed.
     expect(Object.keys(plaid).sort()).toEqual(
-      ["createLinkToken", "describePlaidError", "exchangePublicToken", "getAccounts"].sort(),
+      [
+        "createLinkToken",
+        "describePlaidError",
+        "exchangePublicToken",
+        "getAccounts",
+        "getHoldings",
+      ].sort(),
     );
   });
 

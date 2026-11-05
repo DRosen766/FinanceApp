@@ -44,4 +44,4 @@ next-env.d.ts
 !.env.example
 
 # local SQLite store (contains encrypted Plaid access tokens)
-/data/
+/data

@@ -15,7 +15,12 @@ async function postJson(url: string, body?: unknown) {
   return data;
 }
 
-export function LinkButton() {
+/**
+ * Without `itemId`: links a new institution (public_token → /api/plaid/exchange).
+ * With `itemId`: Plaid Link update mode for that Item (adds consent/accounts). The access
+ * token is unchanged, so there is nothing to exchange; just re-render.
+ */
+export function LinkButton({ itemId, label = "Link account" }: { itemId?: number; label?: string }) {
   const router = useRouter();
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,10 +29,12 @@ export function LinkButton() {
   const onSuccess = useCallback<PlaidLinkOnSuccess>(
     async (publicToken, metadata) => {
       try {
-        await postJson("/api/plaid/exchange", {
-          publicToken,
-          institutionName: metadata.institution?.name ?? null,
-        });
+        if (itemId === undefined) {
+          await postJson("/api/plaid/exchange", {
+            publicToken,
+            institutionName: metadata.institution?.name ?? null,
+          });
+        }
         router.refresh();
       } catch (e) {
         setError((e as Error).message);
@@ -36,7 +43,7 @@ export function LinkButton() {
         setBusy(false);
       }
     },
-    [router],
+    [router, itemId],
   );
 
   const { open, ready } = usePlaidLink({
@@ -56,7 +63,10 @@ export function LinkButton() {
     setBusy(true);
     setError(null);
     try {
-      const { linkToken } = await postJson("/api/plaid/link-token");
+      const { linkToken } = await postJson(
+        "/api/plaid/link-token",
+        itemId === undefined ? undefined : { itemId },
+      );
       setLinkToken(linkToken);
     } catch (e) {
       setError((e as Error).message);
@@ -67,7 +77,7 @@ export function LinkButton() {
   return (
     <div>
       <button onClick={start} disabled={busy}>
-        {busy ? "Opening Plaid…" : "Link account"}
+        {busy ? "Opening Plaid…" : label}
       </button>
       {error && (
         <p role="alert" className="error">

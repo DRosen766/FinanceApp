@@ -1,8 +1,9 @@
+import { money } from "@/lib/format";
 import { listItems } from "@/server/db";
 import { describePlaidError, getAccounts, type Account } from "@/server/plaid";
 import { requireSession } from "@/server/session";
-import { logout } from "./login/actions";
 import { LinkButton } from "./LinkButton";
+import { Nav } from "./Nav";
 
 type InstitutionView = {
   key: string;
@@ -27,29 +28,16 @@ async function loadInstitutions(): Promise<InstitutionView[]> {
   );
 }
 
-function money(amount: number | null, currency: string | null) {
-  if (amount === null) return "—";
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: currency ?? "USD" }).format(
-    amount,
-  );
-}
-
 export default async function DashboardPage() {
   await requireSession();
   const institutions = await loadInstitutions();
 
   return (
     <main>
+      <Nav current="accounts" />
       <header className="row">
         <h1>Accounts</h1>
-        <div className="row">
-          <LinkButton />
-          <form action={logout}>
-            <button type="submit" className="secondary">
-              Sign out
-            </button>
-          </form>
-        </div>
+        <LinkButton />
       </header>
 
       {institutions.length === 0 && <p>No accounts linked yet.</p>}
