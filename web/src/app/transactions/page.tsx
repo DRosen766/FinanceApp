@@ -1,17 +1,27 @@
 import Link from "next/link";
-import { money, signedMoney } from "@/lib/format";
+import { money, quantity, signedMoney } from "@/lib/format";
 import {
   applyFilters,
   paginate,
   parseFilters,
   prettyCategory,
+  rowKey,
   summarize,
+  toCashRow,
+  toInvestmentRow,
   toQuery,
   type Filters,
+  type TxRow,
 } from "@/lib/transactions";
-import { listAccounts, listTransactions, type StoredAccount } from "@/server/db";
+import {
+  listAccounts,
+  listInvestmentTransactions,
+  listTransactions,
+  type StoredAccount,
+} from "@/server/db";
 import { requireSession } from "@/server/session";
 import { syncAllItems, type ItemSyncState } from "@/server/transactions-sync";
+import { LinkButton } from "../LinkButton";
 import { Nav } from "../Nav";
 import { refreshTransactions } from "./actions";
 
@@ -35,22 +45,59 @@ function accountLabel(a: StoredAccount | undefined) {
   return a.mask ? `${a.name} ••${a.mask}` : a.name;
 }
 
+type Note = { key: string; cls: string; text: string; consentItemId?: number };
+
 function StatusNotes({ states }: { states: ItemSyncState[] }) {
-  const notes = states.flatMap((s) => {
-    if (s.error) return [{ key: s.itemId, cls: "error", text: `${s.institutionName}: sync failed (${s.error}). Showing stored transactions.` }];
-    if (s.status && INCOMPLETE_STATUSES.has(s.status))
-      return [{ key: s.itemId, cls: "muted", text: `Plaid is still fetching history for ${s.institutionName}.` }];
-    return [];
+  const notes = states.flatMap((s): Note[] => {
+    const out: Note[] = [];
+    if (s.error)
+      out.push({ key: `c${s.itemId}`, cls: "error", text: `${s.institutionName}: sync failed (${s.error}). Showing stored transactions.` });
+    else if (s.status && INCOMPLETE_STATUSES.has(s.status))
+      out.push({ key: `c${s.itemId}`, cls: "muted", text: `Plaid is still fetching history for ${s.institutionName}.` });
+
+    if (s.investmentError === "ADDITIONAL_CONSENT_REQUIRED")
+      out.push({
+        key: `i${s.itemId}`,
+        cls: "muted",
+        text: `${s.institutionName}: investment activity needs permission. After enabling it, use Refresh now.`,
+        consentItemId: s.itemId,
+      });
+    else if (s.investmentError === "PRODUCT_NOT_READY")
+      out.push({ key: `i${s.itemId}`, cls: "muted", text: `Plaid is still loading investment activity for ${s.institutionName}.` });
+    else if (s.investmentError)
+      out.push({
+        key: `i${s.itemId}`,
+        cls: "error",
+        text: `${s.institutionName}: investment activity sync failed (${s.investmentError}). Showing stored activity.`,
+      });
+    return out;
   });
   if (notes.length === 0) return null;
   return (
     <div className="stack">
       {notes.map((n) => (
-        <p key={n.key} className={n.cls}>
-          {n.text}
-        </p>
+        <div key={n.key} className="row">
+          <p className={n.cls}>{n.text}</p>
+          {n.consentItemId !== undefined && <LinkButton itemId={n.consentItemId} label="Enable investments" />}
+        </div>
       ))}
     </div>
+  );
+}
+
+function Description({ t }: { t: TxRow }) {
+  return (
+    <>
+      {t.merchantName ?? t.name}
+      {t.pending && <span className="badge">Pending</span>}
+      {t.ticker && <span className="badge">{t.ticker}</span>}
+      {t.kind === "investment" && t.quantity ? (
+        <div className="muted small">
+          {quantity(Math.abs(t.quantity))} @ {money(t.price ?? null, t.currency)}
+          {t.fees ? ` · fees ${money(t.fees, t.currency)}` : ""}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -79,6 +126,14 @@ function FilterBar({ filters, accounts }: { filters: Filters; accounts: StoredAc
         </select>
       </label>
       <label>
+        Kind
+        <select name="kind" defaultValue={filters.kind}>
+          <option value="all">All</option>
+          <option value="cash">Banking &amp; cards</option>
+          <option value="investment">Investments</option>
+        </select>
+      </label>
+      <label>
         Type
         <select name="flow" defaultValue={filters.flow}>
           <option value="all">All</option>
@@ -88,7 +143,7 @@ function FilterBar({ filters, accounts }: { filters: Filters; accounts: StoredAc
       </label>
       <label className="grow">
         Search
-        <input type="search" name="q" defaultValue={filters.q} maxLength={100} placeholder="Merchant or description" />
+        <input type="search" name="q" defaultValue={filters.q} maxLength={100} placeholder="Merchant, description or ticker" />
       </label>
       <button type="submit">Apply</button>
     </form>
@@ -100,10 +155,10 @@ export default async function TransactionsPage({ searchParams }: PageProps<"/tra
   const filters = parseFilters(await searchParams);
   const states = await syncAllItems();
 
-  // Cash accounts only in v1; investment activity isn't synced by /transactions/sync.
-  const accounts = listAccounts().filter((a) => a.type !== "investment");
+  const accounts = listAccounts();
   const accountsById = new Map(accounts.map((a) => [a.id, a]));
-  const filtered = applyFilters(listTransactions(), filters);
+  const all = [...listTransactions().map(toCashRow), ...listInvestmentTransactions().map(toInvestmentRow)];
+  const filtered = applyFilters(all, filters);
   const summary = summarize(filtered);
   const { rows, page, pages } = paginate(filtered, filters.page);
 
@@ -148,16 +203,18 @@ export default async function TransactionsPage({ searchParams }: PageProps<"/tra
               </thead>
               <tbody>
                 {rows.map((t) => (
-                  <tr key={t.id}>
+                  <tr key={rowKey(t)}>
                     <td className="nowrap">{formatDate(t.date)}</td>
                     <td>
-                      {t.merchantName ?? t.name}
-                      {t.pending && <span className="badge">Pending</span>}
+                      <Description t={t} />
                     </td>
                     <td>{prettyCategory(t.category)}</td>
                     <td className="muted">{accountLabel(accountsById.get(t.accountId))}</td>
                     {/* Plaid: positive = money out. Display money in as +green, money out as −. */}
-                    <td className={`num nowrap ${t.amount < 0 ? "gain" : ""}`}>
+                    <td
+                      className={`num nowrap ${!t.countsAsCash ? "muted" : t.amount < 0 ? "gain" : ""}`}
+                      title={t.countsAsCash ? undefined : "Not counted in In/Out"}
+                    >
                       {signedMoney(-t.amount, t.currency)}
                     </td>
                   </tr>
@@ -185,6 +242,10 @@ export default async function TransactionsPage({ searchParams }: PageProps<"/tra
           </nav>
         )}
       </section>
+      <p className="footnote muted">
+        Buys, sells and in-kind transfers are shown with greyed amounts and aren&apos;t counted in In/Out
+        or the money in/out filter: they move value inside a brokerage account, not into or out of it.
+      </p>
     </main>
   );
 }

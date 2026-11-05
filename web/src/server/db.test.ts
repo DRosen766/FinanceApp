@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encrypt } from "./crypto";
-import type { TransactionSyncResult } from "./plaid";
+import type { SyncedInvestmentTransaction, TransactionSyncResult } from "./plaid";
 
 let dir: string;
 let dbFile: string;
@@ -149,5 +149,139 @@ describe("applyTransactionSync", () => {
     // Sanity check that the scan works: the readable date and opaque id are present.
     expect(bytes).toContain("2026-11-01");
     expect(bytes).toContain("tx-1");
+  });
+});
+
+// ---------------------------------------------------------------- investment transactions
+
+const TICKER = "QZXV";
+const INV_NAME = "QZXVW DIVIDEND RECEIVED";
+
+const invTx = (id: string, date: string, over: Partial<SyncedInvestmentTransaction> = {}): SyncedInvestmentTransaction => ({
+  plaidInvestmentTransactionId: id,
+  plaidAccountId: "inv-acct",
+  date,
+  name: INV_NAME,
+  type: "cash",
+  subtype: "dividend",
+  quantity: 0,
+  price: 0,
+  amount: -76543.21,
+  fees: null,
+  currency: "USD",
+  ticker: TICKER,
+  securityName: "Qzxv Fund",
+  ...over,
+});
+
+const invAccounts = [
+  { plaidAccountId: "inv-acct", name: "Individual Brokerage", mask: "4321", type: "investment", subtype: "brokerage" },
+];
+
+describe("investment transactions store", () => {
+  it("migrates a v2 database to v3 keeping items, accounts and transactions", async () => {
+    let db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    db.applyTransactionSync(db.listItems()[0].id, syncResult());
+    // Roll back to v2: drop the v3 objects and reset the version.
+    const raw = new Database(dbFile);
+    raw.exec(`DROP TABLE investment_transactions;
+      ALTER TABLE items DROP COLUMN inv_synced_at;
+      ALTER TABLE items DROP COLUMN inv_backfilled_at;
+      ALTER TABLE items DROP COLUMN inv_status;`);
+    raw.pragma("user_version = 2");
+    raw.close();
+
+    db = await loadDb();
+    expect(db.listItems()[0]).toMatchObject({ plaidItemId: "item-1", invBackfilledAt: null, invStatus: null });
+    expect(db.listTransactions()).toHaveLength(1);
+    expect(db.listInvestmentTransactions()).toEqual([]);
+    const check = new Database(dbFile, { readonly: true });
+    expect(check.pragma("user_version", { simple: true })).toBe(3);
+    check.close();
+  });
+
+  it("replaces only rows inside the fetched window and records backfill state", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Fidelity");
+    const itemId = db.listItems()[0].id;
+
+    db.applyInvestmentSync(itemId, {
+      accounts: invAccounts,
+      transactions: [invTx("old", "2025-01-15"), invTx("recent-kept", "2026-10-20"), invTx("recent-cancelled", "2026-10-21")],
+      windowStart: "2024-11-05",
+      windowEnd: "2026-11-05",
+      backfill: true,
+    });
+    expect(db.listInvestmentTransactions()).toHaveLength(3);
+    const item = db.listItems()[0];
+    expect(item.invBackfilledAt).not.toBeNull();
+    expect(item.invStatus).toBe("ok");
+    const acct = db.listAccounts().find((a) => a.type === "investment");
+    expect(acct).toMatchObject({ name: "Individual Brokerage", mask: "4321", institutionName: "Fidelity" });
+
+    // A 30-day refresh no longer returns the cancelled row and corrects another.
+    db.applyInvestmentSync(itemId, {
+      accounts: invAccounts,
+      transactions: [invTx("recent-kept", "2026-10-20", { amount: -1.5 })],
+      windowStart: "2026-10-06",
+      windowEnd: "2026-11-05",
+      backfill: false,
+    });
+    const rows = db.listInvestmentTransactions();
+    expect(rows.map((r) => r.date).sort()).toEqual(["2025-01-15", "2026-10-20"]);
+    expect(rows.find((r) => r.date === "2026-10-20")).toMatchObject({ amount: -1.5, ticker: TICKER, accountId: acct!.id });
+    expect(db.listItems()[0].invBackfilledAt).toBe(item.invBackfilledAt);
+  });
+
+  it("is atomic: a failure partway leaves stored rows and state unchanged", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Fidelity");
+    const itemId = db.listItems()[0].id;
+    const window = { windowStart: "2026-10-06", windowEnd: "2026-11-05" };
+    db.applyInvestmentSync(itemId, { accounts: invAccounts, transactions: [invTx("a", "2026-10-10")], ...window, backfill: false });
+    const before = db.listItems()[0];
+
+    expect(() =>
+      db.applyInvestmentSync(itemId, {
+        accounts: invAccounts,
+        transactions: [invTx("b", "2026-10-11"), invTx("bad", null as unknown as string)],
+        ...window,
+        backfill: true,
+      }),
+    ).toThrow();
+
+    expect(db.listInvestmentTransactions().map((r) => r.date)).toEqual(["2026-10-10"]);
+    expect(db.listItems()[0]).toMatchObject({ invSyncedAt: before.invSyncedAt, invBackfilledAt: null });
+  });
+
+  it("stores investment transaction details only as ciphertext", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Fidelity");
+    db.applyInvestmentSync(db.listItems()[0].id, {
+      accounts: invAccounts,
+      transactions: [invTx("itx-1", "2026-10-10")],
+      windowStart: "2026-10-06",
+      windowEnd: "2026-11-05",
+      backfill: false,
+    });
+    const bytes = [dbFile, `${dbFile}-wal`]
+      .filter(existsSync)
+      .map((f) => readFileSync(f).toString("latin1"))
+      .join("");
+    for (const secret of [TICKER, INV_NAME, "76543.21", "Individual Brokerage", "Qzxv Fund"]) {
+      expect(bytes).not.toContain(secret);
+    }
+    expect(bytes).toContain("itx-1");
+  });
+
+  it("records and clears a quiet investments status", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Bank");
+    const itemId = db.listItems()[0].id;
+    db.setInvestmentStatus(itemId, "PRODUCTS_NOT_SUPPORTED");
+    expect(db.listItems()[0]).toMatchObject({ invStatus: "PRODUCTS_NOT_SUPPORTED" });
+    db.setInvestmentStatus(itemId, null);
+    expect(db.listItems()[0]).toMatchObject({ invStatus: null, invSyncedAt: null });
   });
 });

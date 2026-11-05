@@ -113,3 +113,4 @@ select {
 .nowrap { white-space: nowrap; }
 .pager { margin-top: 12px; }
 .pager a { color: var(--accent); text-decoration: none; }
+.small { font-size: 0.8rem; }
