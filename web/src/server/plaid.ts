@@ -104,6 +104,7 @@ export type InvestmentAccount = {
   name: string;
   mask: string | null;
   subtype: string | null;
+  balance: number | null;
 };
 
 export type Holding = {
@@ -130,7 +131,13 @@ export async function getHoldings(
   return {
     accounts: res.data.accounts
       .filter((a) => a.type === "investment" || holdingAccountIds.has(a.account_id))
-      .map((a) => ({ id: a.account_id, name: a.name, mask: a.mask, subtype: a.subtype ?? null })),
+      .map((a) => ({
+        id: a.account_id,
+        name: a.name,
+        mask: a.mask,
+        subtype: a.subtype ?? null,
+        balance: a.balances.current,
+      })),
     holdings: res.data.holdings.map((h) => {
       const s = securities.get(h.security_id);
       return {

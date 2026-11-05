@@ -9,6 +9,9 @@ import { Nav } from "../Nav";
 // Plaid error codes meaning "this Item hasn't granted Investments / shared investment accounts".
 // Both are fixed by re-opening Link in update mode for that Item.
 const NEEDS_CONSENT = new Set(["ADDITIONAL_CONSENT_REQUIRED", "NO_INVESTMENT_ACCOUNTS"]);
+// The institution doesn't offer Investments at all (e.g. a bank-only connection). Not an error:
+// the connection just has nothing to show here.
+const NOT_APPLICABLE = new Set(["PRODUCTS_NOT_SUPPORTED"]);
 
 type InstitutionPositions = {
   itemId: number;
@@ -43,7 +46,17 @@ function TotalsLine({ totals, label }: { totals: Totals; label: string }) {
         {" "}
         {signedMoney(totals.gain)} ({percent(totals.gainPct)})
       </span>
-      {totals.partial && <span className="muted"> · gain excludes holdings without cost basis</span>}
+      {totals.partial && <span className="muted"> · gain excludes amounts without cost basis</span>}
+    </p>
+  );
+}
+
+function BalanceOnly({ summary, institution }: { summary: AccountSummary; institution: string }) {
+  if (!summary.balanceOnly) return <p className="muted">No holdings.</p>;
+  return (
+    <p className="totals">
+      <span className="muted">Balance</span> <strong>{money(summary.totals.value)}</strong>
+      <span className="muted"> · {institution} doesn&apos;t report holdings for this account</span>
     </p>
   );
 }
@@ -70,9 +83,11 @@ function InstitutionError({ inst }: { inst: InstitutionPositions }) {
 
 export default async function PositionsPage() {
   await requireSession();
-  const institutions = await loadPositions();
+  const loaded = await loadPositions();
+  const institutions = loaded.filter((i) => !(i.error && NOT_APPLICABLE.has(i.error)));
+  const notApplicable = loaded.filter((i) => i.error && NOT_APPLICABLE.has(i.error));
   const all = institutions.flatMap((i) => i.summaries);
-  const hasHoldings = all.some((s) => s.rows.length > 0);
+  const hasValue = all.some((s) => s.rows.length > 0 || s.balanceOnly);
 
   return (
     <main>
@@ -81,8 +96,9 @@ export default async function PositionsPage() {
         <h1>Positions</h1>
       </header>
 
-      {hasHoldings && <TotalsLine totals={grandTotal(all)} label="Total" />}
-      {institutions.length === 0 && <p>No accounts linked yet.</p>}
+      {hasValue && <TotalsLine totals={grandTotal(all)} label="Total" />}
+      {loaded.length === 0 && <p>No accounts linked yet.</p>}
+      {loaded.length > 0 && institutions.length === 0 && <p>No investment accounts linked.</p>}
 
       {institutions.map((inst) => (
         <section key={inst.itemId} className="card">
@@ -92,7 +108,7 @@ export default async function PositionsPage() {
           ) : inst.summaries.length === 0 ? (
             <p className="muted">No investment accounts on this connection.</p>
           ) : (
-            inst.summaries.map(({ account, rows, totals }) => (
+            inst.summaries.map(({ account, rows, totals, balanceOnly, unitemized }) => (
               <div key={account.id} className="account">
                 <h3>
                   {account.name}
@@ -100,7 +116,10 @@ export default async function PositionsPage() {
                   {account.subtype && <span className="muted"> · {account.subtype}</span>}
                 </h3>
                 {rows.length === 0 ? (
-                  <p className="muted">No holdings.</p>
+                  <BalanceOnly
+                    summary={{ account, rows, totals, balanceOnly, unitemized }}
+                    institution={inst.name}
+                  />
                 ) : (
                   <>
                     <TotalsLine totals={totals} label="Account value" />
@@ -135,6 +154,18 @@ export default async function PositionsPage() {
                               <td className={`num ${signClass(r.gainPct)}`}>{percent(r.gainPct)}</td>
                             </tr>
                           ))}
+                          {unitemized > 0 && (
+                            <tr className="muted">
+                              <td>—</td>
+                              <td>Cash &amp; other (not itemized by {inst.name})</td>
+                              <td className="num">—</td>
+                              <td className="num">—</td>
+                              <td className="num">{money(unitemized)}</td>
+                              <td className="num">—</td>
+                              <td className="num">—</td>
+                              <td className="num">—</td>
+                            </tr>
+                          )}
                         </tbody>
                       </table>
                     </div>
@@ -145,6 +176,12 @@ export default async function PositionsPage() {
           )}
         </section>
       ))}
+
+      {notApplicable.length > 0 && (
+        <p className="muted footnote">
+          Not shown (no investment accounts): {notApplicable.map((i) => i.name).join(", ")}
+        </p>
+      )}
     </main>
   );
 }
