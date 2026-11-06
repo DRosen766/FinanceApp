@@ -175,7 +175,7 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
 
   // Color follows the entity: the selected account is always slot 1, Total always slot 2.
   const series: ChartSeries[] = [
-    ...(selected ? [{ key: selected.key, label: selected.label, shortLabel: selected.label.replace(/ \(less .*\)$/, ""), values: project(selected.value, selected.flow.net, months), slot: 1 as const }] : []),
+    ...(selected ? [{ key: selected.key, label: selected.label, values: project(selected.value, selected.flow.net, months), slot: 1 as const }] : []),
     { key: "total", label: "Total", values: project(total.value, total.flow.net, months), slot: 2 },
   ];
   const columns = [...MILESTONES.filter((m) => m < months), months];
@@ -289,9 +289,10 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
       <p className="footnote muted">
         Monthly averages use posted deposits, withdrawals, spending and fees in the chosen range. Market
         returns, dividends, interest, capital gains, buys and sells are excluded, so investment accounts
-        only change by what you put in or take out. Credit card balances are subtracted from your
-        checking account, and card spending counts as money out. Transfers between your own accounts
-        cancel out in the total.
+        only change by what you put in or take out. Credit cards and loans aren&apos;t projected on their
+        own: their balances are paid from checking, so they show up as payments in checking&apos;s money
+        out. If those payments include paying down an older balance, the projection keeps subtracting
+        them every month. Transfers between your own accounts cancel out in the total.
       </p>
     </main>
   );

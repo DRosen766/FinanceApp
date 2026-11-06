@@ -43,16 +43,7 @@ export type Flow = {
   /** Days of history the average is based on (≤ the window length). */
   days: number;
   limited: boolean;
-  /**
-   * Credit card payments inside `in`/`out` (monthly magnitudes): paid out of this account, or
-   * received by this card. When a card is folded into checking, the matched part is an internal
-   * transfer and is removed from both gross columns (net is unaffected).
-   */
-  cardPaymentsOut: number;
-  cardPaymentsIn: number;
 };
-
-const CARD_PAYMENT = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT";
 
 const utcDay = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 const isoDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -83,20 +74,14 @@ export function monthlyFlows(
 ): Map<number, Flow> {
   const fullDays = windowDays(window);
 
-  const sums = new Map<number, { in: number; out: number; payOut: number; payIn: number }>();
-  for (const id of accountIds) sums.set(id, { in: 0, out: 0, payOut: 0, payIn: 0 });
+  const sums = new Map<number, { in: number; out: number }>();
+  for (const id of accountIds) sums.set(id, { in: 0, out: 0 });
   for (const r of rows) {
     const s = sums.get(r.accountId);
     if (!s || r.date < window.from || r.date > window.to || !countsForProjection(r)) continue;
     // Plaid: positive amount = money out of the account.
-    const isCardPayment = r.kind === "cash" && r.categoryDetailed === CARD_PAYMENT;
-    if (r.amount > 0) {
-      s.out += r.amount;
-      if (isCardPayment) s.payOut += r.amount;
-    } else {
-      s.in += -r.amount;
-      if (isCardPayment) s.payIn += -r.amount;
-    }
+    if (r.amount > 0) s.out += r.amount;
+    else s.in += -r.amount;
   }
 
   const out = new Map<number, Flow>();
@@ -114,8 +99,6 @@ export function monthlyFlows(
       net: avgIn - avgOut,
       days,
       limited: days < fullDays,
-      cardPaymentsOut: s.payOut * scale,
-      cardPaymentsIn: s.payIn * scale,
     });
   }
   return out;
@@ -140,52 +123,30 @@ export type ProjLine = {
   key: string;
   label: string;
   institution: string;
-  /** Today's value (credit folded in as negative). */
+  /** Today's balance. */
   value: number;
   flow: Flow;
-  /** Number of credit/loan accounts folded into this line. */
-  folded: number;
   currency: string | null;
 };
 
-const isLiability = (a: ProjAccount) => a.type === "credit" || a.type === "loan";
+/** Credit cards and loans: left out of the projection (see buildLines). */
+export const isLiability = (a: Pick<ProjAccount, "type">) => a.type === "credit" || a.type === "loan";
+
 const ZERO_FLOW: Flow = {
   in: 0,
   out: 0,
   net: 0,
   days: Number.POSITIVE_INFINITY, // neutral for min() in addFlows
   limited: false,
-  cardPaymentsOut: 0,
-  cardPaymentsIn: 0,
 };
 
 function addFlows(a: Flow, b: Flow): Flow {
-  const days = Math.min(a.days, b.days);
   return {
     in: a.in + b.in,
     out: a.out + b.out,
     net: a.net + b.net,
-    days,
+    days: Math.min(a.days, b.days),
     limited: a.limited || b.limited,
-    cardPaymentsOut: a.cardPaymentsOut + b.cardPaymentsOut,
-    cardPaymentsIn: a.cardPaymentsIn + b.cardPaymentsIn,
-  };
-}
-
-/**
- * Folds a card's flow into its checking line. Payments that left checking and arrived on the
- * card are an internal transfer: drop the matched amount from both gross in and out, so the
- * columns show income and spending rather than money moving between your own accounts.
- */
-function foldCardFlow(line: Flow, card: Flow): Flow {
-  const merged = addFlows(line, card);
-  const internal = Math.min(line.cardPaymentsOut, card.cardPaymentsIn);
-  return {
-    ...merged,
-    in: merged.in - internal,
-    out: merged.out - internal,
-    cardPaymentsOut: merged.cardPaymentsOut - internal,
-    cardPaymentsIn: merged.cardPaymentsIn - internal,
   };
 }
 
@@ -194,57 +155,22 @@ export function accountLabel(a: Pick<ProjAccount, "name" | "mask">) {
 }
 
 /**
- * One projection line per account, with credit cards and loans subtracted from a checking
- * account: the one at the same institution, else the first checking account anywhere. Card
- * flows are added to the checking flow, so a card payment from checking (out of checking,
- * into the card) cancels out and only card spending remains. With no checking account at
- * all, liabilities stand alone as negative values.
+ * One projection line per asset account. Credit cards and loans are left out entirely: their
+ * balances get paid from checking, so they already reach the projection as payments in
+ * checking's outflow. Subtracting the balance as well would count the debt twice, and adding
+ * card spending would count it twice too (once on the card, again as the payment).
  */
 export function buildLines(accounts: ProjAccount[], flows: Map<number, Flow>): ProjLine[] {
-  const flowOf = (a: ProjAccount) => (a.accountId !== null ? flows.get(a.accountId) : undefined) ?? ZERO_FLOW;
-  const lines = new Map<string, ProjLine>();
-  const checking: ProjAccount[] = [];
-
-  for (const a of accounts) {
-    if (isLiability(a)) continue;
-    lines.set(a.key, {
+  return accounts
+    .filter((a) => !isLiability(a))
+    .map((a) => ({
       key: a.key,
       label: accountLabel(a),
       institution: a.institution,
       value: a.balance,
-      flow: flowOf(a),
-      folded: 0,
+      flow: (a.accountId !== null ? flows.get(a.accountId) : undefined) ?? ZERO_FLOW,
       currency: a.currency,
-    });
-    if (a.type === "depository" && a.subtype === "checking") checking.push(a);
-  }
-
-  for (const card of accounts.filter(isLiability)) {
-    const target = checking.find((c) => c.itemId === card.itemId) ?? checking[0];
-    if (!target) {
-      lines.set(card.key, {
-        key: card.key,
-        label: accountLabel(card),
-        institution: card.institution,
-        value: -card.balance,
-        flow: flowOf(card),
-        folded: 0,
-        currency: card.currency,
-      });
-      continue;
-    }
-    const line = lines.get(target.key)!;
-    line.value -= card.balance;
-    line.flow = foldCardFlow(line.flow, flowOf(card));
-    line.folded += 1;
-  }
-
-  for (const line of lines.values()) {
-    if (line.folded > 0) {
-      line.label += ` (less ${line.folded} credit ${line.folded === 1 ? "card" : "cards"})`;
-    }
-  }
-  return [...lines.values()];
+    }));
 }
 
 export function totalLine(lines: ProjLine[]): ProjLine {
@@ -254,7 +180,6 @@ export function totalLine(lines: ProjLine[]): ProjLine {
     institution: "",
     value: lines.reduce((s, l) => s + l.value, 0),
     flow: lines.reduce((f, l) => addFlows(f, l.flow), ZERO_FLOW),
-    folded: 0,
     currency: "USD",
   };
 }
