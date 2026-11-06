@@ -42,7 +42,16 @@ export type Flow = {
   /** Days of history the average is based on (≤ WINDOW_DAYS). */
   days: number;
   limited: boolean;
+  /**
+   * Credit card payments inside `in`/`out` (monthly magnitudes): paid out of this account, or
+   * received by this card. When a card is folded into checking, the matched part is an internal
+   * transfer and is removed from both gross columns (net is unaffected).
+   */
+  cardPaymentsOut: number;
+  cardPaymentsIn: number;
 };
+
+const CARD_PAYMENT = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT";
 
 const utcDay = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 const isoDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -63,14 +72,20 @@ export function monthlyFlows(
   const windowStart = isoDay(todayMs - WINDOW_DAYS * DAY_MS);
   const todayIso = isoDay(todayMs);
 
-  const sums = new Map<number, { in: number; out: number }>();
-  for (const id of accountIds) sums.set(id, { in: 0, out: 0 });
+  const sums = new Map<number, { in: number; out: number; payOut: number; payIn: number }>();
+  for (const id of accountIds) sums.set(id, { in: 0, out: 0, payOut: 0, payIn: 0 });
   for (const r of rows) {
     const s = sums.get(r.accountId);
     if (!s || r.date <= windowStart || r.date > todayIso || !countsForProjection(r)) continue;
     // Plaid: positive amount = money out of the account.
-    if (r.amount > 0) s.out += r.amount;
-    else s.in += -r.amount;
+    const isCardPayment = r.kind === "cash" && r.categoryDetailed === CARD_PAYMENT;
+    if (r.amount > 0) {
+      s.out += r.amount;
+      if (isCardPayment) s.payOut += r.amount;
+    } else {
+      s.in += -r.amount;
+      if (isCardPayment) s.payIn += -r.amount;
+    }
   }
 
   const out = new Map<number, Flow>();
@@ -84,7 +99,15 @@ export function monthlyFlows(
     const scale = AVG_MONTH_DAYS / days;
     const avgIn = s.in * scale;
     const avgOut = s.out * scale;
-    out.set(id, { in: avgIn, out: avgOut, net: avgIn - avgOut, days, limited: days < WINDOW_DAYS });
+    out.set(id, {
+      in: avgIn,
+      out: avgOut,
+      net: avgIn - avgOut,
+      days,
+      limited: days < WINDOW_DAYS,
+      cardPaymentsOut: s.payOut * scale,
+      cardPaymentsIn: s.payIn * scale,
+    });
   }
   return out;
 }
@@ -117,11 +140,44 @@ export type ProjLine = {
 };
 
 const isLiability = (a: ProjAccount) => a.type === "credit" || a.type === "loan";
-const ZERO_FLOW: Flow = { in: 0, out: 0, net: 0, days: WINDOW_DAYS, limited: false };
+const ZERO_FLOW: Flow = {
+  in: 0,
+  out: 0,
+  net: 0,
+  days: WINDOW_DAYS,
+  limited: false,
+  cardPaymentsOut: 0,
+  cardPaymentsIn: 0,
+};
 
 function addFlows(a: Flow, b: Flow): Flow {
   const days = Math.min(a.days, b.days);
-  return { in: a.in + b.in, out: a.out + b.out, net: a.net + b.net, days, limited: a.limited || b.limited };
+  return {
+    in: a.in + b.in,
+    out: a.out + b.out,
+    net: a.net + b.net,
+    days,
+    limited: a.limited || b.limited,
+    cardPaymentsOut: a.cardPaymentsOut + b.cardPaymentsOut,
+    cardPaymentsIn: a.cardPaymentsIn + b.cardPaymentsIn,
+  };
+}
+
+/**
+ * Folds a card's flow into its checking line. Payments that left checking and arrived on the
+ * card are an internal transfer: drop the matched amount from both gross in and out, so the
+ * columns show income and spending rather than money moving between your own accounts.
+ */
+function foldCardFlow(line: Flow, card: Flow): Flow {
+  const merged = addFlows(line, card);
+  const internal = Math.min(line.cardPaymentsOut, card.cardPaymentsIn);
+  return {
+    ...merged,
+    in: merged.in - internal,
+    out: merged.out - internal,
+    cardPaymentsOut: merged.cardPaymentsOut - internal,
+    cardPaymentsIn: merged.cardPaymentsIn - internal,
+  };
 }
 
 export function accountLabel(a: Pick<ProjAccount, "name" | "mask">) {
@@ -170,7 +226,7 @@ export function buildLines(accounts: ProjAccount[], flows: Map<number, Flow>): P
     }
     const line = lines.get(target.key)!;
     line.value -= card.balance;
-    line.flow = addFlows(line.flow, flowOf(card));
+    line.flow = foldCardFlow(line.flow, flowOf(card));
     line.folded += 1;
   }
 

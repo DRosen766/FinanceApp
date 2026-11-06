@@ -17,6 +17,8 @@ export type TxRow = {
   amount: number;
   currency: string | null;
   category: string | null;
+  /** Plaid personal_finance_category.detailed (cash rows only). */
+  categoryDetailed?: string | null;
   /**
    * Whether the row moves cash in or out of an account and so counts toward In/Out totals and
    * the flow filter. False for buys, sells, cancels and in-kind transfers, which only reshuffle
@@ -42,6 +44,7 @@ type CashInput = {
   amount: number;
   currency: string | null;
   category: string | null;
+  categoryDetailed?: string | null;
 };
 
 export function toCashRow(t: CashInput): TxRow {
@@ -56,6 +59,7 @@ export function toCashRow(t: CashInput): TxRow {
     amount: t.amount,
     currency: t.currency,
     category: t.category,
+    categoryDetailed: t.categoryDetailed ?? null,
     countsAsCash: true,
   };
 }

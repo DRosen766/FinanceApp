@@ -125,6 +125,8 @@ const flow = (net: number, days = 90) => ({
   net,
   days,
   limited: days < 90,
+  cardPaymentsOut: 0,
+  cardPaymentsIn: 0,
 });
 
 describe("buildLines", () => {
@@ -150,6 +152,43 @@ describe("buildLines", () => {
     expect(checking.folded).toBe(2);
     expect(checking.label).toBe("Checking ••0000 (less 2 credit cards)");
     expect(totalLine(lines)).toMatchObject({ value: 53_500, flow: expect.objectContaining({ net: -300 }) });
+  });
+
+  it("removes matched card payments from gross in/out when folding, leaving net unchanged", () => {
+    const pay = (accountId: number, amount: number) =>
+      toCashRow({
+        id: nextId++,
+        accountId,
+        date: "2026-11-01",
+        pending: false,
+        name: "PAYMENT",
+        merchantName: null,
+        amount,
+        currency: "USD",
+        category: "LOAN_PAYMENTS",
+        categoryDetailed: "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+      });
+    const accounts = [
+      acct({ accountId: 1, balance: 1_000 }),
+      acct({ accountId: 2, type: "credit", subtype: "credit card", balance: 2_000 }),
+    ];
+    const rows = [
+      cash(1, "2026-10-15", -4_000), // paycheck
+      pay(1, 7_000), // payment out of checking (pays down an older balance)
+      pay(2, -7_000), // same payment, received by the card
+      cash(2, "2026-10-20", 3_000), // card spending
+    ];
+    const flows = monthlyFlows(rows, TODAY, new Map(), [1, 2]);
+    const [line] = buildLines(accounts, flows);
+    const scale = AVG_MONTH_DAYS / 90;
+    expect(line.flow.in).toBeCloseTo(4_000 * scale); // not 11k
+    expect(line.flow.out).toBeCloseTo(3_000 * scale); // not 10k
+    expect(line.flow.net).toBeCloseTo(1_000 * scale);
+    expect(line.value).toBe(-1_000);
+
+    // Unfolded (no card linked), the payment is a real outflow and stays in the gross column.
+    const alone = buildLines([accounts[0]], flows)[0];
+    expect(alone.flow.out).toBeCloseTo(7_000 * scale);
   });
 
   it("a card payment from checking cancels out; only card spending remains", () => {
