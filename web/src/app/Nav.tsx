@@ -5,6 +5,7 @@ const LINKS = [
   { key: "accounts", href: "/", label: "Accounts" },
   { key: "positions", href: "/positions", label: "Positions" },
   { key: "transactions", href: "/transactions", label: "Transactions" },
+  { key: "projection", href: "/projection", label: "Projection" },
 ] as const;
 
 export function Nav({ current }: { current: (typeof LINKS)[number]["key"] }) {

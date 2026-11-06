@@ -10,7 +10,7 @@ FinanceApp is a personal finance tracker that pulls data from the owner's bank a
 2. **Web dashboard**: runs locally first, then moves to a remote deployment.
 3. **iOS app**: later.
 
-Current state: `web/` holds a local proof-of-concept dashboard (Next.js 16, App Router, TypeScript) that links accounts through Plaid Link and shows accounts and balances. `mcp/` and `ios/` don't exist yet.
+Current state: `web/` holds a local proof-of-concept dashboard (Next.js 16, App Router, TypeScript) that links accounts through Plaid Link and shows accounts and balances, positions, transactions and a cash-flow projection. `mcp/` and `ios/` don't exist yet.
 
 ## Commands (run from `web/`, Node 22 or later)
 
@@ -73,6 +73,14 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     - Every investments failure is stored in `items.inv_status`, which also stamps `inv_synced_at`, so failures are retried at most every 5 minutes and stay visible meanwhile. `PRODUCTS_NOT_SUPPORTED` and `NO_INVESTMENT_ACCOUNTS` are quiet: not shown, and not retried until a forced refresh.
   - **Totals:** In/Out and the money in/out filter count only rows where `countsAsCash` is true: every cash transaction, plus investment rows of type `cash` (contributions, withdrawals, dividends, interest) or `fee`. Buys, sells, cancels and in-kind transfers are listed but not counted.
   - Cash and investment row ids come from different tables, so React keys and sort tie-breaks use `kind` as well as `id` (`rowKey()`).
+
+- **Projection** (`app/projection/page.tsx`, pure math in `src/lib/projection.ts`):
+  - Value at month *m* = today's live balance (`/accounts/get`, not stored) + average monthly net flow × *m*. It is a straight line: **investment growth is deliberately not modelled**.
+  - Flows are averaged over the trailing 90 days from the encrypted transaction store (`syncAllItems()` runs first). If a link's stored history starts inside the window, the average uses the days covered and the row is flagged "Limited history".
+  - `countsForProjection()`: every posted cash row; investment rows only of type `fee`, or type `cash` with subtype `deposit`, `contribution`, `withdrawal`, `distribution` or `margin expense`. Dividends, interest, capital gains, buys, sells and transfers are growth or reshuffling and are excluded.
+  - `buildLines()` subtracts credit cards and loans from a checking account (same institution first, else the first checking account) and adds their flows, so card payments from checking cancel out. With no checking account, liabilities stand alone as negative values.
+  - Live balances use Plaid account ids; `accountIdsByPlaidId()` joins them to internal ids on the server. Only internal ids appear in URLs.
+  - The chart (`ProjectionChart.tsx`) is server-rendered SVG with CSS-only hover and `<title>` tooltips; there is no client JS. Series colours are `--series-1`/`--series-2` in `globals.css`, with separate dark-mode steps; the selected account is always slot 1 and Total always slot 2.
 
 ## Testing gotchas
 

@@ -8,6 +8,9 @@
   --error: #c62828;
   --gain: #1b7f3b;
   --loss: #c62828;
+  /* Chart series (validated light-surface steps: blue, orange). */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -21,6 +24,9 @@
     --error: #ef7a7a;
     --gain: #5fd08a;
     --loss: #ef7a7a;
+    /* Dark steps of the same hues, validated against the dark card surface. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
   }
 }
 
@@ -114,3 +120,24 @@ select {
 .pager { margin-top: 12px; }
 .pager a { color: var(--accent); text-decoration: none; }
 .small { font-size: 0.8rem; }
+
+/* Projection chart */
+.chart { margin: 16px 0 0; }
+.chart > svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+.chart .legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart .grid { stroke: var(--border); stroke-width: 1; }
+.chart .zero { stroke: var(--muted); stroke-width: 1; }
+.chart .axis { fill: var(--muted); font-size: 11px; }
+.chart .end-label { fill: var(--fg); font-size: 12px; }
+.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .series-1 { stroke: var(--series-1); }
+.chart .series-2 { stroke: var(--series-2); }
+.chart circle.series-1 { fill: var(--series-1); }
+.chart circle.series-2 { fill: var(--series-2); }
+.chart .dot { stroke: var(--card); stroke-width: 2; }
+.chart .hit-area { fill: transparent; }
+.chart .hairline { stroke: var(--muted); stroke-width: 1; }
+.chart .hover { opacity: 0; pointer-events: none; }
+.chart .hit:hover .hover { opacity: 1; }
+.total-row td { border-top: 2px solid var(--border); }

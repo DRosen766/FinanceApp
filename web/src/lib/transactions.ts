@@ -24,6 +24,9 @@ export type TxRow = {
    */
   countsAsCash: boolean;
   ticker?: string | null;
+  /** Raw Plaid investment type/subtype (investment rows only). */
+  investmentType?: string;
+  investmentSubtype?: string | null;
   quantity?: number;
   price?: number;
   fees?: number | null;
@@ -89,6 +92,8 @@ export function toInvestmentRow(t: InvestmentInput): TxRow {
     category: (t.subtype ?? t.type).replace(/ /g, "_"),
     countsAsCash: CASH_INVESTMENT_TYPES.has(t.type),
     ticker: t.ticker,
+    investmentType: t.type,
+    investmentSubtype: t.subtype,
     quantity: t.quantity,
     price: t.price,
     fees: t.fees,
