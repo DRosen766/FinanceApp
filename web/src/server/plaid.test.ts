@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Fake Plaid client: only the method under test. The real module's other exports are kept.
-const fake = vi.hoisted(() => ({ transactionsSync: vi.fn() }));
+const fake = vi.hoisted(() => ({ transactionsSync: vi.fn(), investmentsTransactionsGet: vi.fn() }));
 vi.mock("plaid", async (importOriginal) => ({
   ...(await importOriginal<typeof import("plaid")>()),
   PlaidApi: class {
@@ -34,6 +34,7 @@ describe("plaid read-only allowlist", () => {
         "exchangePublicToken",
         "getAccounts",
         "getHoldings",
+        "getInvestmentTransactions",
         "syncTransactions",
       ].sort(),
     );
@@ -144,5 +145,74 @@ describe("syncTransactions", () => {
     });
     await expect(plaid.syncTransactions("access-x", "c0")).rejects.toThrow("login");
     expect(fake.transactionsSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------- getInvestmentTransactions
+
+const plaidInvTx = (id: string, securityId: string | null = "sec-1") => ({
+  investment_transaction_id: id,
+  account_id: "inv-acct",
+  security_id: securityId,
+  date: "2026-10-01",
+  name: `BUY ${id}`,
+  quantity: 1.5,
+  amount: 150,
+  price: 100,
+  fees: 0,
+  type: "buy",
+  subtype: "buy",
+  iso_currency_code: "USD",
+  unofficial_currency_code: null,
+  // Fields that must be dropped by narrowing:
+  cancel_transaction_id: "CANCEL-SECRET",
+  transaction_datetime: "2026-10-01T15:04:05Z",
+});
+
+const invPage = (txs: unknown[], total: number) => ({
+  data: {
+    accounts: [{ account_id: "inv-acct", name: "Brokerage", mask: "9999", type: "investment", subtype: "brokerage" }],
+    securities: [
+      { security_id: "sec-1", ticker_symbol: "VTI", name: "Vanguard Total", cusip: "CUSIP-SECRET", isin: "ISIN-SECRET" },
+    ],
+    investment_transactions: txs,
+    total_investment_transactions: total,
+  },
+});
+
+describe("getInvestmentTransactions", () => {
+  beforeEach(() => {
+    fake.investmentsTransactionsGet.mockReset();
+  });
+
+  it("pages by offset until total_investment_transactions, joining tickers and narrowing", async () => {
+    fake.investmentsTransactionsGet
+      .mockResolvedValueOnce(invPage([plaidInvTx("a"), plaidInvTx("b")], 3))
+      .mockResolvedValueOnce(invPage([plaidInvTx("c", null)], 3));
+
+    const out = await plaid.getInvestmentTransactions("access-x", "2024-11-05", "2026-11-05");
+
+    const calls = fake.investmentsTransactionsGet.mock.calls.map((c) => c[0]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({
+      start_date: "2024-11-05",
+      end_date: "2026-11-05",
+      options: { count: 500, offset: 0 },
+    });
+    expect(calls[1].options.offset).toBe(2);
+    expect(out.transactions.map((t) => t.plaidInvestmentTransactionId)).toEqual(["a", "b", "c"]);
+    expect(out.transactions[0]).toMatchObject({ ticker: "VTI", securityName: "Vanguard Total", type: "buy", amount: 150 });
+    expect(out.transactions[2]).toMatchObject({ ticker: null, securityName: null });
+    expect(out.accounts).toEqual([
+      { plaidAccountId: "inv-acct", name: "Brokerage", mask: "9999", type: "investment", subtype: "brokerage" },
+    ]);
+    expect(JSON.stringify(out)).not.toMatch(/CANCEL-SECRET|CUSIP-SECRET|ISIN-SECRET|15:04:05/);
+  });
+
+  it("stops on an empty page even if the total says otherwise", async () => {
+    fake.investmentsTransactionsGet.mockResolvedValue(invPage([], 10));
+    const out = await plaid.getInvestmentTransactions("access-x", "2026-10-01", "2026-11-05");
+    expect(out.transactions).toEqual([]);
+    expect(fake.investmentsTransactionsGet).toHaveBeenCalledTimes(1);
   });
 });

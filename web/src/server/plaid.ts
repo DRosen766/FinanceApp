@@ -266,6 +266,91 @@ export async function syncTransactions(
   }
 }
 
+export type SyncedInvestmentTransaction = {
+  plaidInvestmentTransactionId: string;
+  plaidAccountId: string;
+  date: string;
+  name: string;
+  /** Plaid InvestmentTransactionType: buy, sell, cancel, cash, fee, transfer. */
+  type: string;
+  subtype: string | null;
+  quantity: number;
+  price: number;
+  /** Plaid convention: positive = cash debited from the account (e.g. a buy or fee). */
+  amount: number;
+  fees: number | null;
+  currency: string | null;
+  ticker: string | null;
+  securityName: string | null;
+};
+
+export type InvestmentTransactionsResult = {
+  accounts: SyncedAccount[];
+  transactions: SyncedInvestmentTransaction[];
+};
+
+const INV_PAGE_SIZE = 500;
+// 24 months of history rarely exceeds a few thousand rows; this only guards against a loop.
+const INV_MAX_PAGES = 50;
+
+/**
+ * Wraps /investments/transactions/get (read-only). Dates are inclusive YYYY-MM-DD. Pages with
+ * count/offset until total_investment_transactions rows are collected. Narrowing is
+ * deliberate: cancel_transaction_id, transaction_datetime and all security identifiers other
+ * than ticker and name are dropped.
+ */
+export async function getInvestmentTransactions(
+  accessToken: string,
+  startDate: string,
+  endDate: string,
+): Promise<InvestmentTransactionsResult> {
+  const out: InvestmentTransactionsResult = { accounts: [], transactions: [] };
+  for (let page = 0; page < INV_MAX_PAGES; page++) {
+    const res = await plaid().investmentsTransactionsGet({
+      access_token: accessToken,
+      start_date: startDate,
+      end_date: endDate,
+      options: { count: INV_PAGE_SIZE, offset: out.transactions.length },
+    });
+    const d = res.data;
+    const securities = new Map(d.securities.map((s) => [s.security_id, s]));
+    out.accounts = d.accounts.map((a) => ({
+      plaidAccountId: a.account_id,
+      name: a.name,
+      mask: a.mask,
+      type: a.type,
+      subtype: a.subtype ?? null,
+    }));
+    out.transactions.push(
+      ...d.investment_transactions.map((t) => {
+        const s = t.security_id ? securities.get(t.security_id) : undefined;
+        return {
+          plaidInvestmentTransactionId: t.investment_transaction_id,
+          plaidAccountId: t.account_id,
+          date: t.date,
+          name: t.name,
+          type: t.type,
+          subtype: t.subtype ?? null,
+          quantity: t.quantity,
+          price: t.price,
+          amount: t.amount,
+          fees: t.fees ?? null,
+          currency: t.iso_currency_code ?? t.unofficial_currency_code ?? null,
+          ticker: s?.ticker_symbol ?? null,
+          securityName: s?.name ?? null,
+        };
+      }),
+    );
+    if (
+      d.investment_transactions.length === 0 ||
+      out.transactions.length >= d.total_investment_transactions
+    ) {
+      return out;
+    }
+  }
+  throw new Error("investments/transactions/get: page limit exceeded");
+}
+
 /**
  * Loggable summary of a Plaid/axios error. Never log the raw error: axios errors carry the
  * request config, which includes the PLAID-SECRET header and the access_token in the body.

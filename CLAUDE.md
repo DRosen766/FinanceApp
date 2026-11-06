@@ -30,17 +30,18 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
 
 - **`src/server/`** holds everything that touches secrets, and every file starts with `import "server-only"`. Client Components must never import from it.
   - `plaid.ts` is the **only** place the Plaid client exists, and it is never exported. Each exported function wraps one allowed endpoint. `plaid.test.ts` asserts the exact export list, so adding an endpoint deliberately fails that test and forces a security review. Log Plaid failures only through `describePlaidError()`, because raw axios errors contain the `PLAID-SECRET` header and the access token.
-    - Allowed endpoints today: `/link/token/create`, `/item/public_token/exchange`, `/accounts/get`, `/investments/holdings/get` and `/transactions/sync`.
-    - Narrow Plaid responses down to the fields the app uses. `syncTransactions` deliberately drops `location`, `payment_meta`, `original_description`, `counterparties` and `account_owner`.
+    - Allowed endpoints today: `/link/token/create`, `/item/public_token/exchange`, `/accounts/get`, `/investments/holdings/get`, `/investments/transactions/get` and `/transactions/sync`.
+    - Narrow Plaid responses down to the fields the app uses. `syncTransactions` deliberately drops `location`, `payment_meta`, `original_description`, `counterparties` and `account_owner`. `getInvestmentTransactions` keeps only the ticker and name of each security and drops `cancel_transaction_id` and `transaction_datetime`.
   - `db.ts` is the SQLite store (`web/data/finance.db`, gitignored, file mode 0600). It's the store the future MCP server will read. Everything sensitive is AES-256-GCM-encrypted with `crypto.ts`, with an additional authenticated data (AAD) value per row:
 
     | Table | Encrypted column (AAD) | Readable columns |
     |---|---|---|
-    | `items` | `access_token_enc` (`plaid_item_id`) | ids, `institution_name`, `tx_cursor`/`tx_status`/`tx_synced_at` |
+    | `items` | `access_token_enc` (`plaid_item_id`) | ids, `institution_name`, `tx_cursor`/`tx_status`/`tx_synced_at`, `inv_synced_at`/`inv_backfilled_at`/`inv_status` |
     | `accounts` | `data_enc`: name, mask, type, subtype (`acct:<plaid_account_id>`) | ids |
     | `transactions` | `data_enc`: name, merchant, amount, category… (`tx:<plaid_transaction_id>`) | ids, `date`, `pending` |
+    | `investment_transactions` | `data_enc`: name, type, ticker, quantity, price, amount, fees (`itx:<plaid id>`) | ids, `date` |
 
-    - Balances and holdings are fetched live and never stored. Transactions are stored, because `/transactions/sync` is incremental.
+    - Balances and holdings are fetched live and never stored. Cash and investment transactions are stored.
     - **Migrations:** the `MIGRATIONS` array, keyed on `PRAGMA user_version`. It's append-only: every schema change is a new step, and a shipped step is never edited. Each step runs in a transaction together with the version bump.
     - `applyTransactionSync()` writes accounts, added, modified and removed transactions, and the new cursor in **one** transaction, so the cursor can never get out of step with the stored data.
     - The browser only ever sees internal row `id`s (items, accounts, transactions), never Plaid ids or tokens.
@@ -66,6 +67,12 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   - Filters arrive as `GET` query params, parsed with zod in `src/lib/transactions.ts`; bad values fall back to defaults field by field. Filtering happens in memory after decrypting.
   - Plaid's sign convention: a positive `amount` is money **out**.
   - New links request `transactions.days_requested: 730`. Existing links keep the history they were created with.
+  - **Investment activity** comes from `/investments/transactions/get`, which has no cursor and no "removed" list:
+    - The first fetch backfills 730 days; later fetches cover the last 30. `applyInvestmentSync()` deletes the item's stored rows inside the fetched window and inserts what Plaid returned, in one transaction. That is how cancelled or corrected rows disappear.
+    - Cash and investment syncs run independently per item, so one failing never blocks the other. Each has its own 5-minute throttle.
+    - Every investments failure is stored in `items.inv_status`, which also stamps `inv_synced_at`, so failures are retried at most every 5 minutes and stay visible meanwhile. `PRODUCTS_NOT_SUPPORTED` and `NO_INVESTMENT_ACCOUNTS` are quiet: not shown, and not retried until a forced refresh.
+  - **Totals:** In/Out and the money in/out filter count only rows where `countsAsCash` is true: every cash transaction, plus investment rows of type `cash` (contributions, withdrawals, dividends, interest) or `fee`. Buys, sells, cancels and in-kind transfers are listed but not counted.
+  - Cash and investment row ids come from different tables, so React keys and sort tie-breaks use `kind` as well as `id` (`rowKey()`).
 
 ## Testing gotchas
 

@@ -7,6 +7,8 @@ import {
   parseFilters,
   prettyCategory,
   summarize,
+  toCashRow,
+  toInvestmentRow,
   toQuery,
   type TxRow,
 } from "./transactions";
@@ -16,6 +18,8 @@ const TODAY = new Date("2026-11-05T12:00:00Z");
 let nextId = 1;
 const tx = (over: Partial<TxRow>): TxRow => ({
   id: nextId++,
+  kind: "cash",
+  countsAsCash: true,
   accountId: 1,
   date: "2026-11-01",
   pending: false,
@@ -38,13 +42,14 @@ describe("parseFilters", () => {
       range: "365",
       q: "uber",
       flow: "out",
+      kind: "all",
       page: 2,
     });
   });
 
   it("falls back per field on invalid input, without resetting valid fields", () => {
     expect(
-      parseFilters({ account: "-1", range: "abc", q: "x".repeat(101), flow: "sideways", page: "-1" }),
+      parseFilters({ account: "-1", range: "abc", q: "x".repeat(101), flow: "sideways", kind: "x", page: "-1" }),
     ).toEqual(DEFAULT_FILTERS);
     expect(parseFilters({ range: "abc", flow: "in" })).toMatchObject({ range: "90", flow: "in" });
   });
@@ -104,5 +109,82 @@ describe("summarize / paginate / helpers", () => {
     expect(toQuery({ ...DEFAULT_FILTERS, q: "a&b", account: 4 }, { page: 2 })).toBe(
       "?account=4&q=a%26b&page=2",
     );
+  });
+});
+
+// ---------------------------------------------------------------- investment rows
+
+const inv = (over: Partial<Parameters<typeof toInvestmentRow>[0]>) =>
+  toInvestmentRow({
+    id: nextId++,
+    accountId: 9,
+    date: "2026-11-02",
+    name: "BOUGHT VANGUARD TOTAL",
+    type: "buy",
+    subtype: "buy",
+    quantity: 2,
+    price: 250,
+    amount: 500,
+    fees: null,
+    currency: "USD",
+    ticker: "VTI",
+    ...over,
+  });
+
+describe("investment transactions", () => {
+  const buy = inv({});
+  const sell = inv({ type: "sell", subtype: "sell", amount: -300, quantity: -1 });
+  const dividend = inv({ type: "cash", subtype: "dividend", amount: -12.34, quantity: 0, ticker: "VTI" });
+  const contribution = inv({ type: "cash", subtype: "contribution", amount: -1000, quantity: 0, ticker: null });
+  const fee = inv({ type: "fee", subtype: "account fee", amount: 5, quantity: 0, ticker: null });
+  const transferIn = inv({ type: "transfer", subtype: "transfer", amount: 0, quantity: 10 });
+  const coffee = toCashRow({
+    id: buy.id, // same numeric id as an investment row on purpose
+    accountId: 1,
+    date: "2026-11-02",
+    pending: false,
+    name: "COFFEE",
+    merchantName: "Coffee",
+    amount: 4,
+    currency: "USD",
+    category: "FOOD_AND_DRINK",
+  });
+  const rows = [buy, sell, dividend, contribution, fee, transferIn, coffee];
+  const all = { ...DEFAULT_FILTERS, range: "all" as const };
+
+  it("labels rows by subtype and marks only cash and fee types as cash movement", () => {
+    expect(prettyCategory(dividend.category)).toBe("Dividend");
+    expect(prettyCategory(fee.category)).toBe("Account fee");
+    expect([buy, sell, transferIn].map((r) => r.countsAsCash)).toEqual([false, false, false]);
+    expect([dividend, contribution, fee].map((r) => r.countsAsCash)).toEqual([true, true, true]);
+    expect(coffee.countsAsCash).toBe(true);
+  });
+
+  it("leaves buys, sells and transfers out of In/Out but still counts the rows", () => {
+    expect(summarize(rows)).toEqual({ count: 7, moneyIn: 1012.34, moneyOut: 9 });
+  });
+
+  it("applies the money in/out filter only to cash movement", () => {
+    expect(applyFilters(rows, { ...all, flow: "in" }, TODAY)).toEqual(
+      expect.arrayContaining([dividend, contribution]),
+    );
+    expect(applyFilters(rows, { ...all, flow: "in" }, TODAY)).toHaveLength(2);
+    expect(applyFilters(rows, { ...all, flow: "out" }, TODAY).map((r) => r.name)).toEqual(
+      expect.arrayContaining(["COFFEE"]),
+    );
+    expect(applyFilters(rows, { ...all, flow: "out" }, TODAY)).toHaveLength(2); // fee + coffee
+  });
+
+  it("filters by kind and searches tickers", () => {
+    expect(applyFilters(rows, { ...all, kind: "investment" }, TODAY)).toHaveLength(6);
+    expect(applyFilters(rows, { ...all, kind: "cash" }, TODAY)).toEqual([coffee]);
+    expect(applyFilters(rows, { ...all, q: "vti" }, TODAY)).toHaveLength(4);
+    expect(parseFilters({ kind: "investment" }).kind).toBe("investment");
+    expect(toQuery({ ...DEFAULT_FILTERS, kind: "investment" })).toBe("?kind=investment");
+  });
+
+  it("keeps a cash row and an investment row with the same numeric id distinct and stably ordered", () => {
+    const out = applyFilters([buy, coffee], all, TODAY);
+    expect(out.map((r) => r.kind)).toEqual(["cash", "investment"]);
   });
 });
