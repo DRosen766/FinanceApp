@@ -128,31 +128,36 @@ const flow = (net: number, days = 90) => ({
   net,
   days,
   limited: days < 90,
+  cardPaymentsOut: 0,
+  cardPaymentsIn: 0,
 });
 
 describe("buildLines", () => {
-  it("leaves credit cards and loans out: no balance subtracted, no card flows added", () => {
+  it("subtracts credit cards from the checking account at the same institution and adds their flows", () => {
     const accounts = [
       acct({ accountId: 1, name: "Checking", balance: 5_000 }),
       acct({ accountId: 2, name: "Card A", type: "credit", subtype: "credit card", balance: 1_200 }),
-      acct({ accountId: 3, name: "Loan", type: "loan", subtype: "student", balance: 9_000 }),
+      acct({ accountId: 3, name: "Card B", type: "credit", subtype: "credit card", balance: 300 }),
       acct({ accountId: 4, itemId: 2, institution: "Broker", name: "Brokerage", type: "investment", subtype: "brokerage", balance: 50_000 }),
     ];
     const flows = new Map([
-      [1, flow(-1_000, 40)],
-      [2, flow(400)],
-      [3, flow(100)],
+      [1, flow(-1_000)], // includes the card payment leaving checking
+      [2, flow(400)], // payment in exceeds spending this period
+      [3, flow(-200, 40)],
       [4, flow(500)],
     ]);
     const lines = buildLines(accounts, flows);
-    expect(lines.map((l) => l.key)).toEqual(["1", "4"]);
-    const checking = lines[0];
-    expect(checking).toMatchObject({ value: 5_000, label: "Checking ••0000" });
-    expect(checking.flow).toMatchObject({ net: -1_000, limited: true });
-    expect(totalLine(lines)).toMatchObject({ value: 55_000, flow: expect.objectContaining({ net: -500 }) });
+    expect(lines).toHaveLength(2);
+    const checking = lines.find((l) => l.key === "1")!;
+    expect(checking.value).toBe(3_500);
+    expect(checking.flow.net).toBe(-800);
+    expect(checking.flow.limited).toBe(true);
+    expect(checking.folded).toBe(2);
+    expect(checking.label).toBe("Checking ••0000 (less 2 credit cards)");
+    expect(totalLine(lines)).toMatchObject({ value: 53_500, flow: expect.objectContaining({ net: -300 }) });
   });
 
-  it("counts card payments as real money out of checking (that is where the card debt lands)", () => {
+  it("removes matched card payments from gross in/out when folding, leaving net unchanged", () => {
     const pay = (accountId: number, amount: number) =>
       toCashRow({
         id: nextId++,
@@ -172,17 +177,55 @@ describe("buildLines", () => {
     ];
     const rows = [
       cash(1, "2026-10-15", -4_000), // paycheck
-      pay(1, 7_000), // payment out of checking
-      pay(2, -7_000), // same payment, received by the card: ignored with the card
-      cash(2, "2026-10-20", 3_000), // card spending: ignored, it arrives as a payment
+      pay(1, 7_000), // payment out of checking (pays down an older balance)
+      pay(2, -7_000), // same payment, received by the card
+      cash(2, "2026-10-20", 3_000), // card spending
     ];
     const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map(), [1, 2]);
-    const lines = buildLines(accounts, flows);
+    const [line] = buildLines(accounts, flows);
     const scale = AVG_MONTH_DAYS / 90;
+    expect(line.flow.in).toBeCloseTo(4_000 * scale); // not 11k
+    expect(line.flow.out).toBeCloseTo(3_000 * scale); // not 10k
+    expect(line.flow.net).toBeCloseTo(1_000 * scale);
+    expect(line.value).toBe(-1_000);
+
+    // Unfolded (no card linked), the payment is a real outflow and stays in the gross column.
+    const alone = buildLines([accounts[0]], flows)[0];
+    expect(alone.flow.out).toBeCloseTo(7_000 * scale);
+  });
+
+  it("a card payment from checking cancels out; only card spending remains", () => {
+    const accounts = [
+      acct({ accountId: 1, balance: 1_000 }),
+      acct({ accountId: 2, type: "credit", subtype: "credit card", balance: 0 }),
+    ];
+    const rows = [
+      cash(1, "2026-11-01", 500), // checking → card payment (out of checking)
+      cash(2, "2026-11-01", -500), // same payment, into the card
+      cash(2, "2026-10-20", 500), // card spending
+    ];
+    const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map(), [1, 2]);
+    const [line] = buildLines(accounts, flows);
+    expect(line.flow.out - line.flow.in).toBeCloseTo(500 * (AVG_MONTH_DAYS / 90));
+  });
+
+  it("falls back to a checking account at another institution", () => {
+    const accounts = [
+      acct({ accountId: 1, itemId: 1, balance: 100 }),
+      acct({ accountId: 2, itemId: 2, type: "credit", subtype: "credit card", balance: 40 }),
+    ];
+    const lines = buildLines(accounts, new Map());
     expect(lines).toHaveLength(1);
-    expect(lines[0].value).toBe(1_000);
-    expect(lines[0].flow.in).toBeCloseTo(4_000 * scale);
-    expect(lines[0].flow.out).toBeCloseTo(7_000 * scale);
+    expect(lines[0].value).toBe(60);
+  });
+
+  it("shows liabilities alone as negative values when there is no checking account", () => {
+    const accounts = [
+      acct({ accountId: 1, subtype: "savings", balance: 100 }),
+      acct({ accountId: 2, type: "loan", subtype: "student", balance: 9_000 }),
+    ];
+    const lines = buildLines(accounts, new Map());
+    expect(lines.map((l) => l.value)).toEqual([100, -9_000]);
   });
 });
 
