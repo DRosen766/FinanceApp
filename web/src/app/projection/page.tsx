@@ -5,10 +5,16 @@ import {
   HORIZONS,
   monthlyFlows,
   parseProjectionParams,
+  presetWindow,
   project,
+  projectionQuery,
+  resolveWindow,
   totalLine,
-  WINDOW_DAYS,
+  WINDOW_LABELS,
+  WINDOWS,
+  windowDays,
   type ProjAccount,
+  type ProjectionParams,
   type ProjLine,
 } from "@/lib/projection";
 import { toCashRow, toInvestmentRow, type TxRow } from "@/lib/transactions";
@@ -88,12 +94,24 @@ function historyStarts(rows: TxRow[]): Map<number, string> {
   return out;
 }
 
-function Picker({ lines, account, h }: { lines: ProjLine[]; account: string; h: string }) {
+function formatDay(iso: string) {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function Picker({ lines, params, today }: { lines: ProjLine[]; params: ProjectionParams; today: Date }) {
+  // Pre-fill the date inputs with the current window so switching to Custom starts from it.
+  const current = resolveWindow(params, today);
+  const todayIso = presetWindow(1, today).to;
   return (
     <form method="get" action="/projection" className="filters">
       <label className="grow">
         Account
-        <select name="account" defaultValue={account}>
+        <select name="account" defaultValue={params.account}>
           <option value="total">Total only</option>
           {lines.map((l) => (
             <option key={l.key} value={l.key}>
@@ -105,13 +123,31 @@ function Picker({ lines, account, h }: { lines: ProjLine[]; account: string; h: 
       </label>
       <label>
         Horizon
-        <select name="h" defaultValue={h}>
+        <select name="h" defaultValue={params.h}>
           {HORIZONS.map((y) => (
             <option key={y} value={y}>
               {y} {y === "1" ? "year" : "years"}
             </option>
           ))}
         </select>
+      </label>
+      <label>
+        Average over
+        <select name="w" defaultValue={params.w}>
+          {WINDOWS.map((w) => (
+            <option key={w} value={w}>
+              {WINDOW_LABELS[w]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label title="Used when Average over is Custom range">
+        From (custom)
+        <input type="date" name="from" defaultValue={current.from} max={todayIso} />
+      </label>
+      <label title="Used when Average over is Custom range">
+        To (custom)
+        <input type="date" name="to" defaultValue={current.to} max={todayIso} />
       </label>
       <button type="submit">Apply</button>
     </form>
@@ -120,10 +156,11 @@ function Picker({ lines, account, h }: { lines: ProjLine[]; account: string; h: 
 
 export default async function ProjectionPage({ searchParams }: PageProps<"/projection">) {
   await requireSession();
-  const params = parseProjectionParams(await searchParams);
+  const today = new Date();
+  const params = parseProjectionParams(await searchParams, today);
+  const avgWindow = resolveWindow(params, today);
   await syncAllItems();
 
-  const today = new Date();
   const months = Number(params.h) * 12;
   const { accounts, excluded } = await loadAccounts();
   const rows: TxRow[] = [
@@ -131,7 +168,7 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
     ...listInvestmentTransactions().map(toInvestmentRow),
   ];
   const accountIds = accounts.flatMap((a) => (a.accountId !== null ? [a.accountId] : []));
-  const flows = monthlyFlows(rows, today, historyStarts(rows), accountIds);
+  const flows = monthlyFlows(rows, avgWindow, historyStarts(rows), accountIds);
   const lines = buildLines(accounts, flows);
   const total = totalLine(lines);
   const selected = lines.find((l) => l.key === params.account);
@@ -142,7 +179,6 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
     { key: "total", label: "Total", values: project(total.value, total.flow.net, months), slot: 2 },
   ];
   const columns = [...MILESTONES.filter((m) => m < months), months];
-  const hq = params.h === "1" ? "" : `&h=${params.h}`;
 
   const row = (l: ProjLine, isTotal = false) => {
     const points = project(l.value, l.flow.net, months);
@@ -153,7 +189,7 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
             <strong>Total</strong>
           ) : (
             <>
-              <Link href={`/projection?account=${l.key}${hq}`}>{l.label}</Link>
+              <Link href={`/projection${projectionQuery(params, { account: l.key })}`}>{l.label}</Link>
               {l.flow.limited && (
                 <span className="badge" title={`Average based on ${l.flow.days} days of history`}>
                   Limited history
@@ -185,6 +221,13 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
         <h1>Projection</h1>
       </header>
 
+      {params.invalidRange && (
+        <p className="error">
+          That custom range isn&apos;t valid (it needs a start on or before the end, and no future
+          dates). Showing the last 3 months instead.
+        </p>
+      )}
+
       {excluded.length > 0 && (
         <div className="stack">
           {excluded.map((e, i) => (
@@ -200,7 +243,10 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
       ) : (
         <>
           <section className="card">
-            <Picker lines={lines} account={selected ? selected.key : "total"} h={params.h} />
+            <Picker lines={lines} params={{ ...params, account: selected ? selected.key : "total" }} today={today} />
+            <p className="muted small">
+              Averaging {formatDay(avgWindow.from)} – {formatDay(avgWindow.to)} ({windowDays(avgWindow)} days)
+            </p>
             <p className="totals">
               <span className="muted">Total today</span> {money(total.value)}
               {" · "}
@@ -241,7 +287,7 @@ export default async function ProjectionPage({ searchParams }: PageProps<"/proje
       )}
 
       <p className="footnote muted">
-        Averages use the last {WINDOW_DAYS} days of posted deposits, withdrawals, spending and fees. Market
+        Monthly averages use posted deposits, withdrawals, spending and fees in the chosen range. Market
         returns, dividends, interest, capital gains, buys and sells are excluded, so investment accounts
         only change by what you put in or take out. Credit card balances are subtracted from your
         checking account, and card spending counts as money out. Transfers between your own accounts

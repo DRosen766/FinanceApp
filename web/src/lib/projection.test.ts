@@ -6,7 +6,10 @@ import {
   DEFAULT_PROJECTION_PARAMS,
   monthlyFlows,
   parseProjectionParams,
+  presetWindow,
   project,
+  projectionQuery,
+  resolveWindow,
   totalLine,
   type ProjAccount,
 } from "./projection";
@@ -82,7 +85,7 @@ describe("monthlyFlows", () => {
       inv(2, "2026-10-15", "cash", "dividend", -5_000), // growth: ignored
       inv(2, "2026-10-15", "cash", "deposit", -600),
     ];
-    const flows = monthlyFlows(rows, TODAY, new Map(), [1, 2]);
+    const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map(), [1, 2]);
     const scale = AVG_MONTH_DAYS / 90;
     expect(flows.get(1)!.in).toBeCloseTo(900 * scale);
     expect(flows.get(1)!.out).toBeCloseTo(300 * scale);
@@ -93,7 +96,7 @@ describe("monthlyFlows", () => {
 
   it("averages over the days actually covered when history is short, and flags it", () => {
     const rows = [cash(1, "2026-10-08", 300)];
-    const flows = monthlyFlows(rows, TODAY, new Map([[1, "2026-10-08"]]), [1]);
+    const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map([[1, "2026-10-08"]]), [1]);
     const f = flows.get(1)!;
     expect(f.days).toBe(30); // Oct 8 .. Nov 6 inclusive
     expect(f.limited).toBe(true);
@@ -101,7 +104,7 @@ describe("monthlyFlows", () => {
   });
 
   it("gives accounts with no activity a zero flow", () => {
-    expect(monthlyFlows([], TODAY, new Map(), [7]).get(7)).toMatchObject({ in: 0, out: 0, net: 0 });
+    expect(monthlyFlows([], presetWindow(90, TODAY), new Map(), [7]).get(7)).toMatchObject({ in: 0, out: 0, net: 0 });
   });
 });
 
@@ -178,7 +181,7 @@ describe("buildLines", () => {
       pay(2, -7_000), // same payment, received by the card
       cash(2, "2026-10-20", 3_000), // card spending
     ];
-    const flows = monthlyFlows(rows, TODAY, new Map(), [1, 2]);
+    const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map(), [1, 2]);
     const [line] = buildLines(accounts, flows);
     const scale = AVG_MONTH_DAYS / 90;
     expect(line.flow.in).toBeCloseTo(4_000 * scale); // not 11k
@@ -201,7 +204,7 @@ describe("buildLines", () => {
       cash(2, "2026-11-01", -500), // same payment, into the card
       cash(2, "2026-10-20", 500), // card spending
     ];
-    const flows = monthlyFlows(rows, TODAY, new Map(), [1, 2]);
+    const flows = monthlyFlows(rows, presetWindow(90, TODAY), new Map(), [1, 2]);
     const [line] = buildLines(accounts, flows);
     expect(line.flow.out - line.flow.in).toBeCloseTo(500 * (AVG_MONTH_DAYS / 90));
   });
@@ -236,11 +239,62 @@ describe("project", () => {
 
 describe("parseProjectionParams", () => {
   it("parses valid params and falls back per field", () => {
-    expect(parseProjectionParams({})).toEqual(DEFAULT_PROJECTION_PARAMS);
-    expect(parseProjectionParams({ h: "5", account: "12" })).toEqual({ h: "5", account: "12" });
-    expect(parseProjectionParams({ h: "9", account: "12" })).toEqual({ h: "1", account: "12" });
-    expect(parseProjectionParams({ h: "2", account: "abc" })).toEqual({ h: "2", account: "total" });
+    expect(parseProjectionParams({}, TODAY)).toEqual(DEFAULT_PROJECTION_PARAMS);
+    expect(parseProjectionParams({ h: "5", account: "12" }, TODAY)).toMatchObject({ h: "5", account: "12" });
+    expect(parseProjectionParams({ h: "9", account: "12" }, TODAY)).toMatchObject({ h: "1", account: "12" });
+    expect(parseProjectionParams({ h: "2", account: "abc" }, TODAY)).toMatchObject({ h: "2", account: "total" });
     expect(parseProjectionParams({ account: "-1" }).account).toBe("total");
     expect(parseProjectionParams({ account: ["3", "4"] }).account).toBe("3");
+  });
+});
+
+describe("averaging window", () => {
+  it("offers 1, 3, 6 and 12 month presets ending today", () => {
+    for (const [w, from] of [
+      ["30", "2026-10-08"],
+      ["90", "2026-08-09"],
+      ["180", "2026-05-11"],
+      ["365", "2025-11-07"],
+    ] as const) {
+      const p = parseProjectionParams({ w }, TODAY);
+      expect(resolveWindow(p, TODAY)).toEqual({ from, to: "2026-11-06" });
+    }
+    expect(parseProjectionParams({ w: "7" }, TODAY).w).toBe("90");
+  });
+
+  it("accepts a valid custom range and rejects invalid ones with a flag", () => {
+    const ok = parseProjectionParams({ w: "custom", from: "2026-01-01", to: "2026-03-31" }, TODAY);
+    expect(ok).toMatchObject({ w: "custom", from: "2026-01-01", to: "2026-03-31", invalidRange: false });
+    expect(resolveWindow(ok, TODAY)).toEqual({ from: "2026-01-01", to: "2026-03-31" });
+    for (const bad of [
+      { from: "2026-03-31", to: "2026-01-01" }, // reversed
+      { from: "2026-01-01", to: "2026-12-31" }, // future
+      { from: "2026-02-30", to: "2026-03-31" }, // not a date
+      { from: "2026-1-1", to: "2026-03-31" }, // wrong format
+      { from: "2026-01-01" }, // missing end
+    ]) {
+      const p = parseProjectionParams({ w: "custom", ...bad }, TODAY);
+      expect(p, JSON.stringify(bad)).toMatchObject({ w: "90", from: null, to: null, invalidRange: true });
+    }
+  });
+
+  it("averages only inside a custom range, scaled by its length", () => {
+    const rows = [cash(1, "2026-01-15", 300), cash(1, "2026-02-15", 300), cash(1, "2026-06-01", 9_999)];
+    const window = { from: "2026-01-01", to: "2026-03-01" }; // 60 days
+    const f = monthlyFlows(rows, window, new Map(), [1]).get(1)!;
+    expect(f.days).toBe(60);
+    expect(f.out).toBeCloseTo(600 * (AVG_MONTH_DAYS / 60));
+    expect(f.limited).toBe(false);
+  });
+
+  it("flags limited history when the link's data starts inside a long window", () => {
+    const f = monthlyFlows([], presetWindow(365, TODAY), new Map([[1, "2026-08-09"]]), [1]).get(1)!;
+    expect(f).toMatchObject({ days: 90, limited: true });
+  });
+
+  it("keeps the window in links", () => {
+    const p = parseProjectionParams({ w: "custom", from: "2026-01-01", to: "2026-03-31", h: "2" }, TODAY);
+    expect(projectionQuery(p, { account: "4" })).toBe("?account=4&h=2&w=custom&from=2026-01-01&to=2026-03-31");
+    expect(projectionQuery(parseProjectionParams({}, TODAY), { account: "4" })).toBe("?account=4");
   });
 });
