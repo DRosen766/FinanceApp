@@ -134,6 +134,15 @@ describe("applyTransactionSync", () => {
     expect(db.listTransactions()).toHaveLength(1);
   });
 
+  it("maps Plaid account ids to internal ids (server-side join for live balances)", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    db.applyTransactionSync(db.listItems()[0].id, syncResult());
+    const map = db.accountIdsByPlaidId();
+    expect(map.get("acct-1")).toBe(db.listAccounts()[0].id);
+    expect(map.size).toBe(1);
+  });
+
   it("stores transaction and account details only as ciphertext", async () => {
     const db = await loadDb();
     db.saveItem("item-1", "access-sandbox-secret", "Test Bank");

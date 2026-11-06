@@ -396,6 +396,15 @@ export function listAccounts(): StoredAccount[] {
   }));
 }
 
+/** Plaid account id → internal account id. Server-side only: Plaid ids never reach the browser. */
+export function accountIdsByPlaidId(): Map<string, number> {
+  const rows = getDb().prepare(`SELECT id, plaid_account_id FROM accounts`).all() as {
+    id: number;
+    plaid_account_id: string;
+  }[];
+  return new Map(rows.map((r) => [r.plaid_account_id, r.id]));
+}
+
 export type StoredTransaction = TransactionData & {
   /** Internal row id; never the Plaid transaction id. */
   id: number;
