@@ -31,7 +31,7 @@ function defaultDbPath(): string {
  *   accounts.data_enc             ("acct:" + plaid_account_id)  name, mask, type, subtype
  *   transactions.data_enc         ("tx:" + plaid_transaction_id) name, merchant, amount, category…
  *   investment_transactions.data_enc ("itx:" + plaid id) name, type, ticker, quantity, amount…
- *   budgets.amount_enc            ("budget:" + category)          monthly budget amount
+ *   budgets.amount_enc            ("budget:" + category + ":" + from_month) amount or null
  * Readable: opaque Plaid ids, sync cursor/status/time, transaction date and pending flag.
  */
 const MIGRATIONS: ((db: Db) => void)[] = [
@@ -87,13 +87,17 @@ const MIGRATIONS: ((db: Db) => void)[] = [
       CREATE INDEX investment_transactions_date ON investment_transactions(date DESC);
       CREATE INDEX investment_transactions_item_date ON investment_transactions(item_id, date);
     `),
-  // v4: monthly budget amount per budget category (ids from src/lib/budgets.ts).
+  // v4: effective-dated monthly budgets. A row sets a category's amount (or "no budget")
+  // from `from_month` (YYYY-MM) until the category's next row; history stays put so
+  // carryover for past months never changes. Category ids come from src/lib/budgets.ts.
   (db) =>
     db.exec(`
       CREATE TABLE budgets (
-        category   TEXT PRIMARY KEY,
+        category   TEXT NOT NULL,
+        from_month TEXT NOT NULL,
         amount_enc BLOB NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (category, from_month)
       );
     `),
 ];
@@ -450,32 +454,38 @@ export function listTransactions(): StoredTransaction[] {
 
 // ---------------------------------------------------------------- budgets
 
-/** Monthly budget amount per budget category id. Categories without a row have no budget. */
-export function getBudgetAmounts(): Map<string, number> {
-  const rows = getDb().prepare(`SELECT category, amount_enc FROM budgets`).all() as {
-    category: string;
-    amount_enc: Buffer;
-  }[];
+/** One effective-dated budget row: `amount` applies from `fromMonth` on; null = no budget. */
+export type StoredBudgetEntry = { category: string; fromMonth: string; amount: number | null };
+
+export function listBudgetEntries(): StoredBudgetEntry[] {
+  const rows = getDb()
+    .prepare(`SELECT category, from_month, amount_enc FROM budgets ORDER BY category, from_month`)
+    .all() as { category: string; from_month: string; amount_enc: Buffer }[];
   const k = key();
-  return new Map(rows.map((r) => [r.category, openJson<number>(r.amount_enc, k, `budget:${r.category}`)]));
+  return rows.map((r) => ({
+    category: r.category,
+    fromMonth: r.from_month,
+    amount: openJson<number | null>(r.amount_enc, k, `budget:${r.category}:${r.from_month}`),
+  }));
 }
 
 /**
- * Replace budget amounts in one transaction. `null` removes a category's budget. Callers
- * validate category ids and amounts (see parseBudgetForm); this layer only stores them.
+ * Set amounts that apply from `fromMonth` onward, in one transaction: each given category's
+ * later rows are removed (the new amount holds going forward) and earlier rows are kept, so
+ * past months keep the budget they had. Callers validate ids, month and amounts.
  */
-export function setBudgetAmounts(amounts: Map<string, number | null>): void {
+export function setBudgetsFrom(fromMonth: string, amounts: Map<string, number | null>): void {
   const conn = getDb();
   const k = key();
+  const removeLater = conn.prepare(`DELETE FROM budgets WHERE category = ? AND from_month > ?`);
   const upsert = conn.prepare(
-    `INSERT INTO budgets (category, amount_enc, updated_at) VALUES (?, ?, datetime('now'))
-     ON CONFLICT(category) DO UPDATE SET amount_enc = excluded.amount_enc, updated_at = excluded.updated_at`,
+    `INSERT INTO budgets (category, from_month, amount_enc, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(category, from_month) DO UPDATE SET amount_enc = excluded.amount_enc, updated_at = excluded.updated_at`,
   );
-  const remove = conn.prepare(`DELETE FROM budgets WHERE category = ?`);
   conn.transaction(() => {
     for (const [category, amount] of amounts) {
-      if (amount === null) remove.run(category);
-      else upsert.run(category, sealJson(amount, k, `budget:${category}`));
+      removeLater.run(category, fromMonth);
+      upsert.run(category, fromMonth, sealJson(amount, k, `budget:${category}:${fromMonth}`));
     }
   })();
 }

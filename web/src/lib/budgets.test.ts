@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   addMonths,
   BUDGET_CATEGORIES,
+  budgetsFor,
+  carryoverInto,
+  changedBudgets,
+  monthlyActuals,
+  trackingStartMonth,
+  type BudgetEntry,
   BUDGET_FIELD_PREFIX,
   categorize,
   CATEGORY_IDS,
@@ -96,12 +102,12 @@ describe("months", () => {
 });
 
 describe("summarizeBudget", () => {
-  const amounts = new Map<string, number>([
-    ["earnings", 5000],
-    ["bills", 300],
-    ["dining", 200],
-    ["shopping", 100],
-  ]);
+  const amounts: BudgetEntry[] = [
+    { category: "earnings", fromMonth: "2000-01", amount: 5000 },
+    { category: "bills", fromMonth: "2000-01", amount: 300 },
+    { category: "dining", fromMonth: "2000-01", amount: 200 },
+    { category: "shopping", fromMonth: "2000-01", amount: 100 },
+  ];
 
   it("sums the month per category with refunds netted, and excludes transfers", () => {
     const rows = [
@@ -113,7 +119,7 @@ describe("summarizeBudget", () => {
       cash("2026-11-06", 900, "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
       cash("2026-10-31", 999, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // other month
     ];
-    const s = summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-10-01");
+    const s = summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-10-01", null);
     const line = (id: string) => s.lines.find((l) => l.id === id)!;
 
     expect(line("dining").actual).toBe(80); // pending included
@@ -138,14 +144,14 @@ describe("summarizeBudget", () => {
       cash("2026-09-10", 100, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
       cash("2026-10-10", 300, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
     ];
-    const s = summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-08-12");
+    const s = summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-08-12", null);
     expect(s.lines.find((l) => l.id === "dining")!.avg3).toBe(200);
   });
 
   it("uses a full first month, and has no average without history", () => {
     const rows = [cash("2026-08-01", 90, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT")];
-    expect(summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-08-01").lines.find((l) => l.id === "dining")!.avg3).toBe(30);
-    expect(summarizeBudget([], "2026-11", amounts, TODAY, null).lines[0].avg3).toBeNull();
+    expect(summarizeBudget(rows, "2026-11", amounts, TODAY, "2026-08-01", null).lines.find((l) => l.id === "dining")!.avg3).toBe(30);
+    expect(summarizeBudget([], "2026-11", amounts, TODAY, null, null).lines[0].avg3).toBeNull();
   });
 
   it("never averages over the partial current month (viewing next month)", () => {
@@ -153,9 +159,92 @@ describe("summarizeBudget", () => {
       cash("2026-10-10", 300, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
       cash("2026-11-02", 900, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
     ];
-    const s = summarizeBudget(rows, "2026-12", amounts, TODAY, "2026-10-01");
+    const s = summarizeBudget(rows, "2026-12", amounts, TODAY, "2026-10-01", null);
     expect(s.lines.find((l) => l.id === "dining")!.avg3).toBe(300); // only October
     expect(s.daysLeft).toBeNull();
+  });
+});
+
+describe("effective-dated budgets", () => {
+  const entries: BudgetEntry[] = [
+    { category: "dining", fromMonth: "2000-01", amount: 200 },
+    { category: "dining", fromMonth: "2026-10", amount: 250 },
+    { category: "shopping", fromMonth: "2000-01", amount: 100 },
+    { category: "shopping", fromMonth: "2026-10", amount: null }, // budget removed from October
+  ];
+
+  it("uses the latest row at or before the month", () => {
+    expect([...budgetsFor(entries, "2026-09")]).toEqual([["dining", 200], ["shopping", 100]]);
+    expect([...budgetsFor(entries, "2026-10")]).toEqual([["dining", 250]]);
+    expect([...budgetsFor(entries, "2027-05")]).toEqual([["dining", 250]]);
+  });
+
+  it("reports only changed amounts", () => {
+    const submitted = new Map<(typeof CATEGORY_IDS)[number], number | null>([
+      ["dining", 250],
+      ["shopping", 40],
+      ["groceries", null],
+    ]);
+    expect([...changedBudgets(entries, "2026-11", submitted)]).toEqual([["shopping", 40]]);
+  });
+});
+
+describe("carryover", () => {
+  const entries: BudgetEntry[] = [
+    { category: "earnings", fromMonth: "2000-01", amount: 5000 },
+    { category: "dining", fromMonth: "2000-01", amount: 200 },
+    { category: "dining", fromMonth: "2026-10", amount: 300 },
+    { category: "shopping", fromMonth: "2000-01", amount: 100 },
+  ];
+  const rows = [
+    cash("2026-08-15", 999, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // before tracking
+    cash("2026-09-03", 150, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // +50
+    cash("2026-09-04", 160, "GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_SUPERSTORES"), // −60
+    cash("2026-10-02", 320, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // −20 (new 300 budget)
+    cash("2026-10-05", -10, "GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_SUPERSTORES"), // refund: +110
+    cash("2026-10-09", -2500, "INCOME", "INCOME_SALARY"),
+    cash("2026-10-09", 500, "TRANSFER_OUT", "TRANSFER_OUT_ACCOUNT_TRANSFER"), // ignored
+    cash("2026-11-02", 40, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
+  ];
+  const actuals = monthlyActuals(rows);
+
+  it("keeps a running tally from the start month, both directions", () => {
+    const into = (m: string) => carryoverInto(actuals, entries, "2026-09", m);
+    expect(into("2026-09").get("dining")).toBe(0);
+    expect(into("2026-10").get("dining")).toBe(50);
+    expect(into("2026-10").get("shopping")).toBe(-60);
+    expect(into("2026-11").get("dining")).toBe(30); // 50 + (300 − 320)
+    expect(into("2026-11").get("shopping")).toBe(50); // −60 + (100 + 10)
+    expect(into("2026-12").get("dining")).toBe(290); // November so far: 300 − 40
+  });
+
+  it("has no carryover for Earnings, before the start, or without history", () => {
+    expect(carryoverInto(actuals, entries, "2026-09", "2026-11").has("earnings")).toBe(false);
+    expect(carryoverInto(actuals, entries, "2026-09", "2026-08").size).toBe(0);
+    expect(carryoverInto(actuals, entries, null, "2026-11").size).toBe(0);
+  });
+
+  it("leaves a tally unchanged in months without a budget", () => {
+    const groceries = carryoverInto(actuals, entries, "2026-09", "2026-11").get("groceries");
+    expect(groceries).toBe(0);
+  });
+
+  it("feeds the month view: remaining includes carryover", () => {
+    const s = summarizeBudget(rows, "2026-11", entries, TODAY, "2026-08-15", "2026-09");
+    const dining = s.lines.find((l) => l.id === "dining")!;
+    expect(dining.carryover).toBe(30);
+    expect(dining.remaining).toBe(300 + 30 - 40);
+    expect(s.lines.find((l) => l.id === "earnings")!.carryover).toBeNull();
+    expect(s.lines.find((l) => l.id === "groceries")!.carryover).toBeNull(); // no budget
+    expect(s.carryover).toBe(80); // dining 30 + shopping 50
+    expect(s.remaining).toBe(400 + 80 - 40);
+    expect(s.trackingStart).toBe("2026-09");
+  });
+
+  it("starts tracking at the first full month every item has history", () => {
+    expect(trackingStartMonth(["2024-11-07", "2026-08-12", "2026-08-08"])).toBe("2026-09");
+    expect(trackingStartMonth(["2026-08-01"])).toBe("2026-08");
+    expect(trackingStartMonth([])).toBeNull();
   });
 });
 

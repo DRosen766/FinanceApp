@@ -118,7 +118,12 @@ export type CategoryLine = {
   budgeted: number | null;
   /** Spending categories: net money out. Earnings: net money in. Refunds reduce spending. */
   actual: number;
-  /** budgeted − actual; null without a budget. Negative = over budget (or earnings short). */
+  /**
+   * Running tally carried in from earlier months (unspent budget +, overspending −); null
+   * for Earnings, without a budget this month, or before carryover tracking starts.
+   */
+  carryover: number | null;
+  /** budgeted + carryover − actual; null without a budget. Negative = over (or earnings short). */
   remaining: number | null;
   /** Average monthly actual over up to 3 full months before this one; null with no history. */
   avg3: number | null;
@@ -130,8 +135,13 @@ export type BudgetSummary = {
   lines: CategoryLine[];
   transfers: TxRow[];
   spendingBudget: number;
+  /** Sum of spending categories' carryover. */
+  carryover: number;
   currentSpend: number;
+  /** spendingBudget + carryover − currentSpend. */
   remaining: number;
+  /** First month of the carryover tally, or null if there's no history yet. */
+  trackingStart: Month | null;
   /** Earnings budget − bills budget − spending budget. */
   leftForSavings: number;
   /** Days left in the month including today; null unless `month` is the current month. */
@@ -143,16 +153,20 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
  * Summarize one month. `historyStart` is the earliest stored cash transaction date: months
- * that begin before it are partial and are left out of the 3-month average.
+ * that begin before it are partial and are left out of the 3-month average. `trackingStart`
+ * is the first month of the carryover tally (see trackingStartMonth).
  * Pending transactions count, so the current month is up to date.
  */
 export function summarizeBudget(
   rows: TxRow[],
   month: Month,
-  amounts: Map<string, number>,
+  entries: BudgetEntry[],
   today: Date,
   historyStart: string | null,
+  trackingStart: Month | null,
 ): BudgetSummary {
+  const amounts = budgetsFor(entries, month);
+  const carry = carryoverInto(monthlyActuals(rows), entries, trackingStart, month);
   const { from, to, days } = monthRange(month);
   const todayIso = today.toISOString().slice(0, 10);
   const avgMonths = [1, 2, 3]
@@ -185,13 +199,15 @@ export function summarizeBudget(
   const lines: CategoryLine[] = BUDGET_CATEGORIES.map((c) => {
     const budgeted = amounts.get(c.id) ?? null;
     const act = round2(actual.get(c.id) ?? 0);
+    const carryover = budgeted === null ? null : (carry.get(c.id) ?? null);
     return {
       id: c.id,
       name: c.name,
       group: c.group,
       budgeted,
+      carryover,
       actual: act,
-      remaining: budgeted === null ? null : round2(budgeted - act),
+      remaining: budgeted === null ? null : round2(budgeted + (carryover ?? 0) - act),
       avg3: avgMonths.length ? round2((prior.get(c.id) ?? 0) / avgMonths.length) : null,
       rows: byCat.get(c.id) ?? [],
     };
@@ -199,6 +215,7 @@ export function summarizeBudget(
 
   const spending = lines.filter((l) => l.group === "spending");
   const spendingBudget = round2(spending.reduce((s, l) => s + (l.budgeted ?? 0), 0));
+  const carryover = round2(spending.reduce((s, l) => s + (l.carryover ?? 0), 0));
   const currentSpend = round2(spending.reduce((s, l) => s + l.actual, 0));
   const budgetOf = (id: CategoryId) => amounts.get(id) ?? 0;
   const isCurrent = month === monthOf(today);
@@ -207,8 +224,10 @@ export function summarizeBudget(
     lines,
     transfers,
     spendingBudget,
+    carryover,
     currentSpend,
-    remaining: round2(spendingBudget - currentSpend),
+    remaining: round2(spendingBudget + carryover - currentSpend),
+    trackingStart,
     leftForSavings: round2(budgetOf("earnings") - budgetOf("bills") - spendingBudget),
     daysLeft: isCurrent ? days - today.getUTCDate() + 1 : null,
   };
@@ -218,6 +237,91 @@ export function summarizeBudget(
 function monthStartAfter(isoDate: string): string {
   const m = isoDate.slice(0, 7);
   return isoDate.endsWith("-01") ? `${m}-01` : `${addMonths(m, 1)}-01`;
+}
+
+// ---------------------------------------------------------------- effective-dated budgets
+
+/** A stored budget row: `amount` applies from `fromMonth` until the category's next row. */
+export type BudgetEntry = { category: string; fromMonth: Month; amount: number | null };
+
+/** Amount in effect for `month` per category (the latest row at or before it); no-budget rows omitted. */
+export function budgetsFor(entries: BudgetEntry[], month: Month): Map<string, number> {
+  const latest = new Map<string, BudgetEntry>();
+  for (const e of entries) {
+    if (e.fromMonth > month) continue;
+    const cur = latest.get(e.category);
+    if (!cur || e.fromMonth > cur.fromMonth) latest.set(e.category, e);
+  }
+  const out = new Map<string, number>();
+  for (const [c, e] of latest) if (e.amount !== null) out.set(c, e.amount);
+  return out;
+}
+
+/** Only the submitted amounts that differ from what's in effect for `month`. */
+export function changedBudgets(
+  entries: BudgetEntry[],
+  month: Month,
+  submitted: Map<CategoryId, number | null>,
+): Map<CategoryId, number | null> {
+  const current = budgetsFor(entries, month);
+  const out = new Map<CategoryId, number | null>();
+  for (const [id, amount] of submitted) {
+    if ((current.get(id) ?? null) !== amount) out.set(id, amount);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- carryover
+
+/**
+ * First month of the carryover tally: the first full month in which every linked item has
+ * stored history. Starting earlier would read a missing account's months as unspent budget.
+ * `firstDates` is the earliest stored transaction date of each item that has any.
+ */
+export function trackingStartMonth(firstDates: string[]): Month | null {
+  if (!firstDates.length) return null;
+  const latest = firstDates.reduce((m, d) => (d > m ? d : m));
+  return monthStartAfter(latest).slice(0, 7);
+}
+
+/** Net actual per month and budget category (same sign rules as the month view). */
+export function monthlyActuals(rows: TxRow[]): Map<Month, Map<CategoryId, number>> {
+  const out = new Map<Month, Map<CategoryId, number>>();
+  for (const r of rows) {
+    const a = categorize(r);
+    if (a === null || a === TRANSFER) continue;
+    const m = r.date.slice(0, 7);
+    const byCat = out.get(m) ?? new Map<CategoryId, number>();
+    byCat.set(a, (byCat.get(a) ?? 0) + signed(a, r.amount));
+    out.set(m, byCat);
+  }
+  return out;
+}
+
+/**
+ * Carryover into `month` per expense category: the running sum of (budget − actual) over
+ * every month from `start` up to, not including, `month`. A month without a budget for a
+ * category leaves its tally unchanged. Earnings has no carryover. Empty before `start`.
+ */
+export function carryoverInto(
+  actuals: Map<Month, Map<CategoryId, number>>,
+  entries: BudgetEntry[],
+  start: Month | null,
+  month: Month,
+): Map<CategoryId, number> {
+  const carry = new Map<CategoryId, number>();
+  if (start === null || month < start) return carry;
+  for (const c of BUDGET_CATEGORIES) if (c.id !== "earnings") carry.set(c.id, 0);
+  for (let m = start; m < month; m = addMonths(m, 1)) {
+    const budgets = budgetsFor(entries, m);
+    for (const id of carry.keys()) {
+      const b = budgets.get(id);
+      if (b === undefined) continue;
+      carry.set(id, carry.get(id)! + b - (actuals.get(m)?.get(id) ?? 0));
+    }
+  }
+  for (const [id, v] of carry) carry.set(id, round2(v));
+  return carry;
 }
 
 // ---------------------------------------------------------------- form input

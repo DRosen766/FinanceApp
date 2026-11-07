@@ -40,7 +40,7 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     | `accounts` | `data_enc`: name, mask, type, subtype (`acct:<plaid_account_id>`) | ids |
     | `transactions` | `data_enc`: name, merchant, amount, category… (`tx:<plaid_transaction_id>`) | ids, `date`, `pending` |
     | `investment_transactions` | `data_enc`: name, type, ticker, quantity, price, amount, fees (`itx:<plaid id>`) | ids, `date` |
-    | `budgets` | `amount_enc`: monthly amount (`budget:<category id>`) | category id |
+    | `budgets` | `amount_enc`: monthly amount or null (`budget:<category id>:<from_month>`) | category id, `from_month` |
 
     - Balances and holdings are fetched live and never stored. Cash and investment transactions are stored.
     - **Migrations:** the `MIGRATIONS` array, keyed on `PRAGMA user_version`. It's append-only: every schema change is a new step, and a shipped step is never edited. Each step runs in a transaction together with the version bump.
@@ -86,10 +86,12 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
 - **Budgets** (`app/budgets/page.tsx`, pure logic in `src/lib/budgets.ts`, save via the `saveBudgets` server action):
   - `BUDGET_CATEGORIES` is the fixed category list (the owner's Rocket Money categories plus "Entertainment & Rec."). Ids are stored in the DB: never rename a shipped id.
   - `categorize()` maps Plaid `personal_finance_category` to a budget category, detailed first (`BY_DETAILED`), then primary (`BY_PRIMARY`), else Everything Else. Credit card payments and `TRANSFER_IN`/`TRANSFER_OUT` are not budgeted, because card purchases already count as spending. Investment rows are left out. Hygiene and Software & Tech get little or nothing from Plaid until per-transaction recategorizing exists.
-  - Spending is net (refunds reduce a category); Earnings is shown as money in. Pending rows count. One amount per category applies to every month.
+  - Spending is net (refunds reduce a category); Earnings is shown as money in. Pending rows count.
+  - **Budgets are effective-dated**: a `budgets` row sets a category's amount (null = no budget) from `from_month` until its next row. Saving while viewing month M writes only changed categories at M and deletes their later rows (`setBudgetsFrom`), so earlier months keep the budget they had.
+  - **Carryover** is computed, never stored: `carryoverInto()` sums budget − actual per expense category for every month from `trackingStartMonth()` (the first full month in which every linked item has history) up to the viewed month. Overspending carries as a deficit; a month without a budget leaves the tally unchanged; Earnings has none. Remaining = budget + carryover − actual. Editing a past month's budget therefore changes carryover from that month on, by design.
   - The 3-month average uses only full months: not before the earliest stored transaction, and never the current partial month.
   - `parseBudgetForm()` requires every category field, ignores unknown fields, and rejects negatives, more than 2 decimals and values over 10M. On failure the redirect carries only category ids, never amounts.
-  - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page. Real amounts never go in code, fixtures or commits.
+  - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page, as rows from `2000-01`. Real amounts never go in code, fixtures or commits.
 
 ## Testing gotchas
 

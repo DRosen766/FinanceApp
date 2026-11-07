@@ -2,11 +2,14 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { parseBudgetForm, parseMonth } from "@/lib/budgets";
-import { setBudgetAmounts } from "@/server/db";
+import { changedBudgets, parseBudgetForm, parseMonth } from "@/lib/budgets";
+import { listBudgetEntries, setBudgetsFrom } from "@/server/db";
 import { requireSession } from "@/server/session";
 
-/** Save every category's monthly budget. Next checks the Origin of server action posts. */
+/**
+ * Save the budgets shown for a month. Changed amounts apply from that month onward; earlier
+ * months keep theirs, so past carryover doesn't move. Next checks server action Origins.
+ */
 export async function saveBudgets(form: FormData): Promise<void> {
   await requireSession();
   const month = parseMonth(form.get("month"), new Date());
@@ -15,7 +18,8 @@ export async function saveBudgets(form: FormData): Promise<void> {
     // Only category ids (from our own fixed list) go in the URL, never amounts.
     redirect(`/budgets?month=${month}&invalid=${parsed.invalid.join(",")}`);
   }
-  setBudgetAmounts(parsed.amounts);
+  const changes = changedBudgets(listBudgetEntries(), month, parsed.amounts);
+  if (changes.size) setBudgetsFrom(month, changes);
   revalidatePath("/budgets");
-  redirect(`/budgets?month=${month}&saved=1`);
+  redirect(`/budgets?month=${month}&saved=${changes.size}`);
 }

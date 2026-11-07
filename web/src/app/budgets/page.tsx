@@ -8,10 +8,11 @@ import {
   monthOf,
   parseMonth,
   summarizeBudget,
+  trackingStartMonth,
   type CategoryLine,
 } from "@/lib/budgets";
 import { prettyCategory, rowKey, toCashRow, type TxRow } from "@/lib/transactions";
-import { getBudgetAmounts, listAccounts, listTransactions } from "@/server/db";
+import { listAccounts, listBudgetEntries, listTransactions } from "@/server/db";
 import { requireSession } from "@/server/session";
 import { syncAllItems } from "@/server/transactions-sync";
 import { Nav } from "../Nav";
@@ -45,6 +46,11 @@ function Remaining({ line }: { line: CategoryLine }) {
   return <>{money(line.remaining)}</>;
 }
 
+function Carryover({ line }: { line: CategoryLine }) {
+  if (line.carryover === null) return <span className="muted">—</span>;
+  return <span className={line.carryover < 0 ? "loss" : undefined}>{signedMoney(line.carryover)}</span>;
+}
+
 function CategoryRow({ line, invalid }: { line: CategoryLine; invalid: boolean }) {
   return (
     <tr>
@@ -65,6 +71,9 @@ function CategoryRow({ line, invalid }: { line: CategoryLine; invalid: boolean }
           aria-label={`${line.name} monthly budget`}
           aria-invalid={invalid || undefined}
         />
+      </td>
+      <td className="num nowrap">
+        <Carryover line={line} />
       </td>
       <td className="num nowrap">{money(line.actual)}</td>
       <td className="num nowrap">
@@ -113,8 +122,23 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
   const stored = listTransactions();
   const rows = stored.map(toCashRow);
   const historyStart = stored.length ? stored.reduce((m, t) => (t.date < m ? t.date : m), stored[0].date) : null;
-  const summary = summarizeBudget(rows, month, getBudgetAmounts(), today, historyStart);
   const accounts = new Map(listAccounts().map((a) => [a.id, a]));
+  // Earliest stored date per linked item: carryover starts once every item has history.
+  const firstByItem = new Map<number, string>();
+  for (const t of stored) {
+    const item = accounts.get(t.accountId)?.itemId;
+    if (item === undefined) continue;
+    const cur = firstByItem.get(item);
+    if (!cur || t.date < cur) firstByItem.set(item, t.date);
+  }
+  const summary = summarizeBudget(
+    rows,
+    month,
+    listBudgetEntries(),
+    today,
+    historyStart,
+    trackingStartMonth([...firstByItem.values()]),
+  );
   const accountName = (id: number) => {
     const a = accounts.get(id);
     return a ? `${a.name}${a.mask ? ` ••${a.mask}` : ""}` : "Unknown account";
@@ -138,7 +162,13 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
         </div>
       </header>
 
-      {params.saved === "1" && <p className="muted">Budgets saved.</p>}
+      {typeof params.saved === "string" && (
+        <p className="muted">
+          {params.saved === "0"
+            ? "No budget changes to save."
+            : `Saved. Changes apply from ${monthLabel(month)} onward; earlier months keep their budgets.`}
+        </p>
+      )}
       {invalid.size > 0 && (
         <p className="error">
           Not saved: enter a positive amount with at most 2 decimals (or leave blank) for the
@@ -150,7 +180,16 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
         <p className="totals">
           <span className="muted">Left to spend</span>{" "}
           <strong className={summary.remaining < 0 ? "loss" : undefined}>{money(summary.remaining)}</strong>{" "}
-          <span className="muted">of {money(summary.spendingBudget)}</span>
+          <span className="muted">
+            of {money(summary.spendingBudget + summary.carryover)}
+            {summary.carryover !== 0 && (
+              <>
+                {" "}
+                ({money(summary.spendingBudget)} budget {summary.carryover > 0 ? "+" : "−"}{" "}
+                {money(Math.abs(summary.carryover))} carryover)
+              </>
+            )}
+          </span>
         </p>
         {perDay !== null && (
           <p className="muted small">
@@ -162,6 +201,10 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
           <div>
             <div className="muted small">Spending budget</div>
             {money(summary.spendingBudget)}
+          </div>
+          <div>
+            <div className="muted small">Carryover</div>
+            <span className={summary.carryover < 0 ? "loss" : undefined}>{signedMoney(summary.carryover)}</span>
           </div>
           <div>
             <div className="muted small">Current spend</div>
@@ -189,6 +232,9 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
                 <tr>
                   <th>Budget basics</th>
                   <th className="num">Budgeted / mo</th>
+                  <th className="num" title="Running tally of unspent (+) or overspent (−) budget from earlier months">
+                    Carryover
+                  </th>
                   <th className="num">Actual</th>
                   <th className="num">Remaining</th>
                   <th className="num nowrap" title="Average of up to 3 full months before this one">
@@ -203,7 +249,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
               </tbody>
               <thead>
                 <tr>
-                  <th colSpan={5}>Budget categories</th>
+                  <th colSpan={6}>Budget categories</th>
                 </tr>
               </thead>
               <tbody>
@@ -215,6 +261,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
                     <strong>Spending budget</strong>
                   </td>
                   <td className="num nowrap">{money(summary.spendingBudget)}</td>
+                  <td className={`num nowrap ${summary.carryover < 0 ? "loss" : ""}`}>{signedMoney(summary.carryover)}</td>
                   <td className="num nowrap">{money(summary.currentSpend)}</td>
                   <td className={`num nowrap ${summary.remaining < 0 ? "loss" : ""}`}>
                     {summary.remaining < 0 ? `${money(-summary.remaining)} over` : money(summary.remaining)}
@@ -225,7 +272,9 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
             </table>
           </div>
           <div className="row form-actions">
-            <span className="muted small">Budgets apply to every month. Leave blank for no budget.</span>
+            <span className="muted small">
+              Changes apply from {monthLabel(month)} onward. Leave blank for no budget.
+            </span>
             <button type="submit">Save budgets</button>
           </div>
         </form>
@@ -265,6 +314,9 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
       </section>
 
       <p className="footnote muted">
+        {summary.trackingStart
+          ? `Carryover is a running tally since ${monthLabel(summary.trackingStart)}, the first full month with history from every linked account: each month's unspent budget rolls forward, and overspending rolls forward as a deficit. `
+          : "Carryover starts once transactions have synced. "}
         Categories come from Plaid&apos;s category on each transaction. Card purchases count as
         spending, so credit card payments and transfers between your own accounts are not budgeted.
         Refunds reduce their category&apos;s spending. Pending transactions are included. Activity

@@ -307,30 +307,36 @@ describe("budgets store", () => {
 
     db = await loadDb();
     expect(db.listItems()).toHaveLength(1);
-    expect(db.getBudgetAmounts().size).toBe(0);
+    expect(db.listBudgetEntries()).toEqual([]);
     expect(db.SCHEMA_VERSION).toBe(4);
   });
 
-  it("upserts and clears amounts atomically", async () => {
+  it("keeps earlier months and replaces later ones, atomically per save", async () => {
     const db = await loadDb();
-    db.setBudgetAmounts(new Map([["dining", 250], ["groceries", 400.5]]));
-    db.setBudgetAmounts(new Map<string, number | null>([["dining", 300], ["groceries", null]]));
-    expect([...db.getBudgetAmounts()]).toEqual([["dining", 300]]);
+    db.setBudgetsFrom("2026-01", new Map([["dining", 200], ["shopping", 100]]));
+    db.setBudgetsFrom("2026-12", new Map([["dining", 400]]));
+    db.setBudgetsFrom("2026-10", new Map<string, number | null>([["dining", 300], ["shopping", null]]));
+    expect(db.listBudgetEntries()).toEqual([
+      { category: "dining", fromMonth: "2026-01", amount: 200 },
+      { category: "dining", fromMonth: "2026-10", amount: 300 }, // December row superseded
+      { category: "shopping", fromMonth: "2026-01", amount: 100 },
+      { category: "shopping", fromMonth: "2026-10", amount: null },
+    ]);
   });
 
-  it("stores amounts only as ciphertext, bound to their category", async () => {
+  it("stores amounts only as ciphertext, bound to category and month", async () => {
     const db = await loadDb();
-    db.setBudgetAmounts(new Map([["dining", 98765.43]]));
+    db.setBudgetsFrom("2026-01", new Map([["dining", 98765.43]]));
     const bytes = [dbFile, `${dbFile}-wal`]
       .filter(existsSync)
       .map((f) => readFileSync(f).toString("latin1"))
       .join("");
     expect(bytes).not.toContain("98765.43");
 
-    // Moving a ciphertext onto another category fails authentication (AAD).
+    // Moving a ciphertext to another month fails authentication (AAD).
     const raw = new Database(dbFile);
-    raw.prepare(`INSERT INTO budgets (category, amount_enc) SELECT 'shopping', amount_enc FROM budgets WHERE category = 'dining'`).run();
+    raw.prepare(`UPDATE budgets SET from_month = '2026-02' WHERE category = 'dining'`).run();
     raw.close();
-    expect(() => db.getBudgetAmounts()).toThrow();
+    expect(() => db.listBudgetEntries()).toThrow();
   });
 });
