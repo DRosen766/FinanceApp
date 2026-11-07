@@ -40,6 +40,7 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     | `accounts` | `data_enc`: name, mask, type, subtype (`acct:<plaid_account_id>`) | ids |
     | `transactions` | `data_enc`: name, merchant, amount, category… (`tx:<plaid_transaction_id>`) | ids, `date`, `pending` |
     | `investment_transactions` | `data_enc`: name, type, ticker, quantity, price, amount, fees (`itx:<plaid id>`) | ids, `date` |
+    | `budgets` | `amount_enc`: monthly amount (`budget:<category id>`) | category id |
 
     - Balances and holdings are fetched live and never stored. Cash and investment transactions are stored.
     - **Migrations:** the `MIGRATIONS` array, keyed on `PRAGMA user_version`. It's append-only: every schema change is a new step, and a shipped step is never edited. Each step runs in a transaction together with the version bump.
@@ -82,6 +83,13 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     - Don't switch to "leave cards out and count card payments as checking outflow": payments include paying down older balances (a one-off payoff then gets extrapolated as a monthly expense) and lag spending by a statement cycle. Folding counts real spending once and today's owed balance once. Matched payments are removed from gross In/Out so those columns show income and spending.
   - Live balances use Plaid account ids; `accountIdsByPlaidId()` joins them to internal ids on the server. Only internal ids appear in URLs.
   - The chart (`ProjectionChart.tsx`) is server-rendered SVG with CSS-only hover and `<title>` tooltips; there is no client JS. Series colours are `--series-1`/`--series-2` in `globals.css`, with separate dark-mode steps; the selected account is always slot 1 and Total always slot 2.
+- **Budgets** (`app/budgets/page.tsx`, pure logic in `src/lib/budgets.ts`, save via the `saveBudgets` server action):
+  - `BUDGET_CATEGORIES` is the fixed category list (the owner's Rocket Money categories plus "Entertainment & Rec."). Ids are stored in the DB: never rename a shipped id.
+  - `categorize()` maps Plaid `personal_finance_category` to a budget category, detailed first (`BY_DETAILED`), then primary (`BY_PRIMARY`), else Everything Else. Credit card payments and `TRANSFER_IN`/`TRANSFER_OUT` are not budgeted, because card purchases already count as spending. Investment rows are left out. Hygiene and Software & Tech get little or nothing from Plaid until per-transaction recategorizing exists.
+  - Spending is net (refunds reduce a category); Earnings is shown as money in. Pending rows count. One amount per category applies to every month.
+  - The 3-month average uses only full months: not before the earliest stored transaction, and never the current partial month.
+  - `parseBudgetForm()` requires every category field, ignores unknown fields, and rejects negatives, more than 2 decimals and values over 10M. On failure the redirect carries only category ids, never amounts.
+  - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page. Real amounts never go in code, fixtures or commits.
 
 ## Testing gotchas
 

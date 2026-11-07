@@ -192,9 +192,10 @@ describe("investment transactions store", () => {
     let db = await loadDb();
     db.saveItem("item-1", "access-sandbox-1", "Test Bank");
     db.applyTransactionSync(db.listItems()[0].id, syncResult());
-    // Roll back to v2: drop the v3 objects and reset the version.
+    // Roll back to v2: drop the v3 (and later) objects and reset the version.
     const raw = new Database(dbFile);
-    raw.exec(`DROP TABLE investment_transactions;
+    raw.exec(`DROP TABLE budgets;
+      DROP TABLE investment_transactions;
       ALTER TABLE items DROP COLUMN inv_synced_at;
       ALTER TABLE items DROP COLUMN inv_backfilled_at;
       ALTER TABLE items DROP COLUMN inv_status;`);
@@ -206,7 +207,7 @@ describe("investment transactions store", () => {
     expect(db.listTransactions()).toHaveLength(1);
     expect(db.listInvestmentTransactions()).toEqual([]);
     const check = new Database(dbFile, { readonly: true });
-    expect(check.pragma("user_version", { simple: true })).toBe(3);
+    expect(check.pragma("user_version", { simple: true })).toBe(db.SCHEMA_VERSION);
     check.close();
   });
 
@@ -292,5 +293,44 @@ describe("investment transactions store", () => {
     expect(db.listItems()[0]).toMatchObject({ invStatus: "PRODUCTS_NOT_SUPPORTED" });
     db.setInvestmentStatus(itemId, null);
     expect(db.listItems()[0]).toMatchObject({ invStatus: null, invSyncedAt: null });
+  });
+});
+
+describe("budgets store", () => {
+  it("migrates a v3 database to v4 keeping existing data", async () => {
+    let db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    const raw = new Database(dbFile);
+    raw.exec(`DROP TABLE budgets;`);
+    raw.pragma("user_version = 3");
+    raw.close();
+
+    db = await loadDb();
+    expect(db.listItems()).toHaveLength(1);
+    expect(db.getBudgetAmounts().size).toBe(0);
+    expect(db.SCHEMA_VERSION).toBe(4);
+  });
+
+  it("upserts and clears amounts atomically", async () => {
+    const db = await loadDb();
+    db.setBudgetAmounts(new Map([["dining", 250], ["groceries", 400.5]]));
+    db.setBudgetAmounts(new Map<string, number | null>([["dining", 300], ["groceries", null]]));
+    expect([...db.getBudgetAmounts()]).toEqual([["dining", 300]]);
+  });
+
+  it("stores amounts only as ciphertext, bound to their category", async () => {
+    const db = await loadDb();
+    db.setBudgetAmounts(new Map([["dining", 98765.43]]));
+    const bytes = [dbFile, `${dbFile}-wal`]
+      .filter(existsSync)
+      .map((f) => readFileSync(f).toString("latin1"))
+      .join("");
+    expect(bytes).not.toContain("98765.43");
+
+    // Moving a ciphertext onto another category fails authentication (AAD).
+    const raw = new Database(dbFile);
+    raw.prepare(`INSERT INTO budgets (category, amount_enc) SELECT 'shopping', amount_enc FROM budgets WHERE category = 'dining'`).run();
+    raw.close();
+    expect(() => db.getBudgetAmounts()).toThrow();
   });
 });

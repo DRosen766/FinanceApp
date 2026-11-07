@@ -1,0 +1,275 @@
+import Link from "next/link";
+import { money, signedMoney } from "@/lib/format";
+import {
+  addMonths,
+  BUDGET_FIELD_PREFIX,
+  isCategoryId,
+  monthLabel,
+  monthOf,
+  parseMonth,
+  summarizeBudget,
+  type CategoryLine,
+} from "@/lib/budgets";
+import { prettyCategory, rowKey, toCashRow, type TxRow } from "@/lib/transactions";
+import { getBudgetAmounts, listAccounts, listTransactions } from "@/server/db";
+import { requireSession } from "@/server/session";
+import { syncAllItems } from "@/server/transactions-sync";
+import { Nav } from "../Nav";
+import { saveBudgets } from "./actions";
+
+function formatDate(iso: string) {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** Budget progress: a bar with the share used. Over budget also says so in text, not color alone. */
+function Progress({ line }: { line: CategoryLine }) {
+  if (!line.budgeted || line.budgeted <= 0) return null;
+  const used = line.actual / line.budgeted;
+  const over = line.group === "spending" && used > 1;
+  return (
+    <div className={`bar${over ? " over" : ""}`} aria-hidden="true">
+      <span style={{ width: `${Math.max(0, Math.min(1, used)) * 100}%` }} />
+    </div>
+  );
+}
+
+function Remaining({ line }: { line: CategoryLine }) {
+  if (line.remaining === null) return <span className="muted">—</span>;
+  if (line.group === "spending" && line.remaining < 0) {
+    return <span className="loss">{money(-line.remaining)} over</span>;
+  }
+  return <>{money(line.remaining)}</>;
+}
+
+function CategoryRow({ line, invalid }: { line: CategoryLine; invalid: boolean }) {
+  return (
+    <tr>
+      <td>
+        <a href={`#cat-${line.id}`}>{line.name}</a>
+        <Progress line={line} />
+      </td>
+      <td className="num">
+        <input
+          className={`amount${invalid ? " invalid" : ""}`}
+          name={BUDGET_FIELD_PREFIX + line.id}
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          placeholder="0"
+          pattern="\$?[0-9,]*(\.[0-9]{1,2})?"
+          defaultValue={line.budgeted === null ? "" : String(line.budgeted)}
+          aria-label={`${line.name} monthly budget`}
+          aria-invalid={invalid || undefined}
+        />
+      </td>
+      <td className="num nowrap">{money(line.actual)}</td>
+      <td className="num nowrap">
+        <Remaining line={line} />
+      </td>
+      <td className="num nowrap muted">{line.avg3 === null ? "—" : money(line.avg3)}</td>
+    </tr>
+  );
+}
+
+function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: number) => string }) {
+  return (
+    <div className="table-scroll">
+      <table>
+        <tbody>
+          {rows.map((t) => (
+            <tr key={rowKey(t)}>
+              <td className="nowrap muted">{formatDate(t.date)}</td>
+              <td>
+                {t.merchantName ?? t.name}
+                {t.pending && <span className="badge">Pending</span>}
+                <div className="muted small">
+                  {accountName(t.accountId)} · {prettyCategory(t.categoryDetailed ?? t.category)}
+                </div>
+              </td>
+              {/* Same convention as the Transactions page: money out −, money in +. */}
+              <td className={`num nowrap ${t.amount < 0 ? "gain" : ""}`}>{signedMoney(-t.amount, t.currency)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default async function BudgetsPage({ searchParams }: PageProps<"/budgets">) {
+  await requireSession();
+  const today = new Date();
+  const params = await searchParams;
+  const month = parseMonth(params.month, today);
+  const invalid = new Set(
+    (typeof params.invalid === "string" ? params.invalid.split(",") : []).filter(isCategoryId),
+  );
+  await syncAllItems();
+
+  const stored = listTransactions();
+  const rows = stored.map(toCashRow);
+  const historyStart = stored.length ? stored.reduce((m, t) => (t.date < m ? t.date : m), stored[0].date) : null;
+  const summary = summarizeBudget(rows, month, getBudgetAmounts(), today, historyStart);
+  const accounts = new Map(listAccounts().map((a) => [a.id, a]));
+  const accountName = (id: number) => {
+    const a = accounts.get(id);
+    return a ? `${a.name}${a.mask ? ` ••${a.mask}` : ""}` : "Unknown account";
+  };
+
+  const basics = summary.lines.filter((l) => l.group === "basics");
+  const spending = summary.lines.filter((l) => l.group === "spending");
+  const nextMonth = addMonths(month, 1);
+  const canGoNext = nextMonth <= addMonths(monthOf(today), 1);
+  const perDay =
+    summary.daysLeft && summary.remaining > 0 ? summary.remaining / summary.daysLeft : null;
+
+  return (
+    <main>
+      <Nav current="budgets" />
+      <header className="row">
+        <h1>{monthLabel(month)} Budget</h1>
+        <div className="row month-nav">
+          <Link href={`/budgets?month=${addMonths(month, -1)}`}>← {monthLabel(addMonths(month, -1))}</Link>
+          {canGoNext && <Link href={`/budgets?month=${nextMonth}`}>{monthLabel(nextMonth)} →</Link>}
+        </div>
+      </header>
+
+      {params.saved === "1" && <p className="muted">Budgets saved.</p>}
+      {invalid.size > 0 && (
+        <p className="error">
+          Not saved: enter a positive amount with at most 2 decimals (or leave blank) for the
+          highlighted categories.
+        </p>
+      )}
+
+      <section className="card">
+        <p className="totals">
+          <span className="muted">Left to spend</span>{" "}
+          <strong className={summary.remaining < 0 ? "loss" : undefined}>{money(summary.remaining)}</strong>{" "}
+          <span className="muted">of {money(summary.spendingBudget)}</span>
+        </p>
+        {perDay !== null && (
+          <p className="muted small">
+            That&apos;s {money(perDay)}/day for the next {summary.daysLeft}{" "}
+            {summary.daysLeft === 1 ? "day" : "days"} of the month.
+          </p>
+        )}
+        <div className="stats">
+          <div>
+            <div className="muted small">Spending budget</div>
+            {money(summary.spendingBudget)}
+          </div>
+          <div>
+            <div className="muted small">Current spend</div>
+            {money(summary.currentSpend)}
+          </div>
+          <div>
+            <div className="muted small">Remaining</div>
+            <span className={summary.remaining < 0 ? "loss" : undefined}>{money(summary.remaining)}</span>
+          </div>
+          <div>
+            <div className="muted small">Left for savings (budgeted)</div>
+            <span className={summary.leftForSavings < 0 ? "loss" : undefined}>
+              {money(summary.leftForSavings)}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <form action={saveBudgets}>
+          <input type="hidden" name="month" value={month} />
+          <div className="table-scroll">
+            <table className="budgets">
+              <thead>
+                <tr>
+                  <th>Budget basics</th>
+                  <th className="num">Budgeted / mo</th>
+                  <th className="num">Actual</th>
+                  <th className="num">Remaining</th>
+                  <th className="num nowrap" title="Average of up to 3 full months before this one">
+                    3-mo avg
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {basics.map((l) => (
+                  <CategoryRow key={l.id} line={l} invalid={invalid.has(l.id)} />
+                ))}
+              </tbody>
+              <thead>
+                <tr>
+                  <th colSpan={5}>Budget categories</th>
+                </tr>
+              </thead>
+              <tbody>
+                {spending.map((l) => (
+                  <CategoryRow key={l.id} line={l} invalid={invalid.has(l.id)} />
+                ))}
+                <tr className="total-row">
+                  <td>
+                    <strong>Spending budget</strong>
+                  </td>
+                  <td className="num nowrap">{money(summary.spendingBudget)}</td>
+                  <td className="num nowrap">{money(summary.currentSpend)}</td>
+                  <td className={`num nowrap ${summary.remaining < 0 ? "loss" : ""}`}>
+                    {summary.remaining < 0 ? `${money(-summary.remaining)} over` : money(summary.remaining)}
+                  </td>
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="row form-actions">
+            <span className="muted small">Budgets apply to every month. Leave blank for no budget.</span>
+            <button type="submit">Save budgets</button>
+          </div>
+        </form>
+      </section>
+
+      <section className="card">
+        <h2>Transactions by category</h2>
+        {summary.lines.map((l) => (
+          <details key={l.id} id={`cat-${l.id}`} className="category">
+            <summary>
+              <span>{l.name}</span>
+              <span className="muted small">
+                {l.rows.length} {l.rows.length === 1 ? "transaction" : "transactions"} · {money(l.actual)}{" "}
+                {l.id === "earnings" ? "received" : "spent"}
+              </span>
+            </summary>
+            {l.rows.length ? (
+              <TxTable rows={l.rows} accountName={accountName} />
+            ) : (
+              <p className="muted small">Nothing this month.</p>
+            )}
+          </details>
+        ))}
+        <details className="category">
+          <summary>
+            <span>Not budgeted: transfers and card payments</span>
+            <span className="muted small">
+              {summary.transfers.length} {summary.transfers.length === 1 ? "transaction" : "transactions"}
+            </span>
+          </summary>
+          {summary.transfers.length ? (
+            <TxTable rows={summary.transfers} accountName={accountName} />
+          ) : (
+            <p className="muted small">Nothing this month.</p>
+          )}
+        </details>
+      </section>
+
+      <p className="footnote muted">
+        Categories come from Plaid&apos;s category on each transaction. Card purchases count as
+        spending, so credit card payments and transfers between your own accounts are not budgeted.
+        Refunds reduce their category&apos;s spending. Pending transactions are included. Activity
+        inside investment accounts (buys, sells, dividends) is not part of budgets.
+      </p>
+    </main>
+  );
+}

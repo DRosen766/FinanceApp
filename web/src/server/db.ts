@@ -31,6 +31,7 @@ function defaultDbPath(): string {
  *   accounts.data_enc             ("acct:" + plaid_account_id)  name, mask, type, subtype
  *   transactions.data_enc         ("tx:" + plaid_transaction_id) name, merchant, amount, category…
  *   investment_transactions.data_enc ("itx:" + plaid id) name, type, ticker, quantity, amount…
+ *   budgets.amount_enc            ("budget:" + category)          monthly budget amount
  * Readable: opaque Plaid ids, sync cursor/status/time, transaction date and pending flag.
  */
 const MIGRATIONS: ((db: Db) => void)[] = [
@@ -85,6 +86,15 @@ const MIGRATIONS: ((db: Db) => void)[] = [
       );
       CREATE INDEX investment_transactions_date ON investment_transactions(date DESC);
       CREATE INDEX investment_transactions_item_date ON investment_transactions(item_id, date);
+    `),
+  // v4: monthly budget amount per budget category (ids from src/lib/budgets.ts).
+  (db) =>
+    db.exec(`
+      CREATE TABLE budgets (
+        category   TEXT PRIMARY KEY,
+        amount_enc BLOB NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `),
 ];
 
@@ -436,4 +446,36 @@ export function listTransactions(): StoredTransaction[] {
     pending: r.pending === 1,
     ...openJson<TransactionData>(r.data_enc, k, `tx:${r.plaid_transaction_id}`),
   }));
+}
+
+// ---------------------------------------------------------------- budgets
+
+/** Monthly budget amount per budget category id. Categories without a row have no budget. */
+export function getBudgetAmounts(): Map<string, number> {
+  const rows = getDb().prepare(`SELECT category, amount_enc FROM budgets`).all() as {
+    category: string;
+    amount_enc: Buffer;
+  }[];
+  const k = key();
+  return new Map(rows.map((r) => [r.category, openJson<number>(r.amount_enc, k, `budget:${r.category}`)]));
+}
+
+/**
+ * Replace budget amounts in one transaction. `null` removes a category's budget. Callers
+ * validate category ids and amounts (see parseBudgetForm); this layer only stores them.
+ */
+export function setBudgetAmounts(amounts: Map<string, number | null>): void {
+  const conn = getDb();
+  const k = key();
+  const upsert = conn.prepare(
+    `INSERT INTO budgets (category, amount_enc, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(category) DO UPDATE SET amount_enc = excluded.amount_enc, updated_at = excluded.updated_at`,
+  );
+  const remove = conn.prepare(`DELETE FROM budgets WHERE category = ?`);
+  conn.transaction(() => {
+    for (const [category, amount] of amounts) {
+      if (amount === null) remove.run(category);
+      else upsert.run(category, sealJson(amount, k, `budget:${category}`));
+    }
+  })();
 }
