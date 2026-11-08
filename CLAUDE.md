@@ -55,7 +55,7 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   - Login is a server action (`app/login/actions.ts`) that checks the password with argon2 and an in-memory throttle.
 - **CSP:** `proxy.ts` sets a CSP with a fresh nonce on every request, allowing `cdn.plaid.com` for Link. Pages must render per request for the nonce to reach Next's scripts, so a page that would otherwise be static calls `await connection()`. Static security headers and `Cache-Control: no-store` live in `next.config.ts`. Cache Components is deliberately left off.
 - **Link flow:**
-  1. `LinkButton` calls `POST /api/plaid/link-token` and opens Plaid Link.
+  1. `LinkButton` calls `POST /api/plaid/link-token` and opens Plaid Link with `window.Plaid.create`. Plaid's script is loaded on the first click by `src/lib/plaid-link.ts`, once per page through a module-level promise. Don't go back to `react-plaid-link`: its loader removes a still-loading script tag on unmount, so React StrictMode's double mount added a second tag and Plaid warned that Link was embedded more than once.
   2. Link returns a `public_token`, which goes to `POST /api/plaid/exchange`.
   3. The server exchanges it and stores the encrypted access token, then returns `{ok:true}`.
   4. The dashboard (`app/page.tsx`, a server component) decrypts the tokens and calls `/accounts/get`.

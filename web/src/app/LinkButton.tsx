@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import { usePlaidLink, type PlaidLinkOnSuccess } from "react-plaid-link";
+import { useEffect, useRef, useState } from "react";
+import { loadPlaidLink, type PlaidHandler } from "@/lib/plaid-link";
 
 async function postJson(url: string, body?: unknown) {
   const res = await fetch(url, {
@@ -19,55 +19,60 @@ async function postJson(url: string, body?: unknown) {
  * Without `itemId`: links a new institution (public_token → /api/plaid/exchange).
  * With `itemId`: Plaid Link update mode for that Item (adds consent/accounts). The access
  * token is unchanged, so there is nothing to exchange; just re-render.
+ *
+ * Plaid's script loads on the first click (once per page, see lib/plaid-link.ts), not on
+ * every page view.
  */
 export function LinkButton({ itemId, label = "Link account" }: { itemId?: number; label?: string }) {
   const router = useRouter();
-  const [linkToken, setLinkToken] = useState<string | null>(null);
+  const handler = useRef<PlaidHandler | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const onSuccess = useCallback<PlaidLinkOnSuccess>(
-    async (publicToken, metadata) => {
-      try {
-        if (itemId === undefined) {
-          await postJson("/api/plaid/exchange", {
-            publicToken,
-            institutionName: metadata.institution?.name ?? null,
-          });
-        }
-        router.refresh();
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setLinkToken(null);
-        setBusy(false);
-      }
+  // Tear down an open Link iframe if the button unmounts (e.g. navigation).
+  useEffect(
+    () => () => {
+      handler.current?.destroy();
+      handler.current = null;
     },
-    [router, itemId],
+    [],
   );
 
-  const { open, ready } = usePlaidLink({
-    token: linkToken,
-    onSuccess,
-    onExit: () => {
-      setLinkToken(null);
-      setBusy(false);
-    },
-  });
-
-  useEffect(() => {
-    if (linkToken && ready) open();
-  }, [linkToken, ready, open]);
+  const finish = () => {
+    handler.current?.destroy();
+    handler.current = null;
+    setBusy(false);
+  };
 
   async function start() {
     setBusy(true);
     setError(null);
     try {
-      const { linkToken } = await postJson(
-        "/api/plaid/link-token",
-        itemId === undefined ? undefined : { itemId },
-      );
-      setLinkToken(linkToken);
+      const [{ linkToken }, Plaid] = await Promise.all([
+        postJson("/api/plaid/link-token", itemId === undefined ? undefined : { itemId }),
+        loadPlaidLink(),
+      ]);
+      handler.current?.destroy();
+      handler.current = Plaid.create({
+        token: linkToken,
+        onSuccess: async (publicToken, metadata) => {
+          try {
+            if (itemId === undefined) {
+              await postJson("/api/plaid/exchange", {
+                publicToken,
+                institutionName: metadata.institution?.name ?? null,
+              });
+            }
+            router.refresh();
+          } catch (e) {
+            setError((e as Error).message);
+          } finally {
+            finish();
+          }
+        },
+        onExit: finish,
+      });
+      handler.current.open();
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
