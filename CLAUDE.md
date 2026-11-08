@@ -40,6 +40,8 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     | `accounts` | `data_enc`: name, mask, type, subtype (`acct:<plaid_account_id>`) | ids |
     | `transactions` | `data_enc`: name, merchant, amount, category… (`tx:<plaid_transaction_id>`) | ids, `date`, `pending` |
     | `investment_transactions` | `data_enc`: name, type, ticker, quantity, price, amount, fees (`itx:<plaid id>`) | ids, `date` |
+    | `budgets` | `amount_enc`: monthly amount or null (`budget:<category id>:<from_month>`) | category id, `from_month` |
+    | `category_overrides` | `data_enc`: budget category, source (`ovr:<plaid_transaction_id>`) | `plaid_transaction_id` (FK, cascades) |
 
     - Balances and holdings are fetched live and never stored. Cash and investment transactions are stored.
     - **Migrations:** the `MIGRATIONS` array, keyed on `PRAGMA user_version`. It's append-only: every schema change is a new step, and a shipped step is never edited. Each step runs in a transaction together with the version bump.
@@ -53,7 +55,7 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   - Login is a server action (`app/login/actions.ts`) that checks the password with argon2 and an in-memory throttle.
 - **CSP:** `proxy.ts` sets a CSP with a fresh nonce on every request, allowing `cdn.plaid.com` for Link. Pages must render per request for the nonce to reach Next's scripts, so a page that would otherwise be static calls `await connection()`. Static security headers and `Cache-Control: no-store` live in `next.config.ts`. Cache Components is deliberately left off.
 - **Link flow:**
-  1. `LinkButton` calls `POST /api/plaid/link-token` and opens Plaid Link.
+  1. `LinkButton` calls `POST /api/plaid/link-token` and opens Plaid Link with `window.Plaid.create`. Plaid's script is loaded on the first click by `src/lib/plaid-link.ts`, once per page through a module-level promise. Don't go back to `react-plaid-link`: its loader removes a still-loading script tag on unmount, so React StrictMode's double mount added a second tag and Plaid warned that Link was embedded more than once.
   2. Link returns a `public_token`, which goes to `POST /api/plaid/exchange`.
   3. The server exchanges it and stores the encrypted access token, then returns `{ok:true}`.
   4. The dashboard (`app/page.tsx`, a server component) decrypts the tokens and calls `/accounts/get`.
@@ -82,6 +84,16 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
     - Don't switch to "leave cards out and count card payments as checking outflow": payments include paying down older balances (a one-off payoff then gets extrapolated as a monthly expense) and lag spending by a statement cycle. Folding counts real spending once and today's owed balance once. Matched payments are removed from gross In/Out so those columns show income and spending.
   - Live balances use Plaid account ids; `accountIdsByPlaidId()` joins them to internal ids on the server. Only internal ids appear in URLs.
   - The chart (`ProjectionChart.tsx`) is server-rendered SVG with CSS-only hover and `<title>` tooltips; there is no client JS. Series colours are `--series-1`/`--series-2` in `globals.css`, with separate dark-mode steps; the selected account is always slot 1 and Total always slot 2.
+- **Budgets** (`app/budgets/page.tsx`, pure logic in `src/lib/budgets.ts`, save via the `saveBudgets` server action):
+  - `BUDGET_CATEGORIES` is the fixed category list (the owner's Rocket Money categories plus "Entertainment & Rec."). Ids are stored in the DB: never rename a shipped id.
+  - `categorize()` order: a per-transaction override (`TxRow.budgetCategory`, from `category_overrides`), then descriptor rules (`BY_NAME`, generic merchant patterns only, e.g. "Amazon Tips" → Groceries), then Plaid `personal_finance_category`, detailed first (`BY_DETAILED`), then primary (`BY_PRIMARY`), else Everything Else. Credit card payments and `TRANSFER_IN`/`TRANSFER_OUT` are not budgeted, because card purchases already count as spending. Investment rows are left out. Hygiene and Software & Tech get little or nothing from Plaid until per-transaction recategorizing exists.
+  - Spending is net (refunds reduce a category); Earnings is shown as money in. Pending rows count.
+  - **Budgets are effective-dated**: a `budgets` row sets a category's amount (null = no budget) from `from_month` until its next row. Saving while viewing month M writes only changed categories at M and deletes their later rows (`setBudgetsFrom`), so earlier months keep the budget they had.
+  - **Carryover** is computed, never stored: `carryoverInto()` sums budget − actual per expense category for every month from `trackingStartMonth()` (the first full month in which every linked item has history) up to the viewed month. Overspending carries as a deficit; a month without a budget leaves the tally unchanged; Earnings has none. Remaining = budget + carryover − actual. Editing a past month's budget therefore changes carryover from that month on, by design.
+  - The 3-month average uses only full months: not before the earliest stored transaction, and never the current partial month.
+  - `parseBudgetForm()` requires every category field, ignores unknown fields, and rejects negatives, more than 2 decimals and values over 10M. On failure the redirect carries only category ids, never amounts.
+  - **Amazon import** (`src/lib/amazon.ts`, `importAmazonOrders` action): the bank shows every Amazon order alike, so the owner pastes the text of Amazon's Your Payments → Transactions page. Every charge of an order that has an "Amazon Tips" charge (only grocery deliveries take tips) is matched to a posted bank transaction by card last 4, exact cents and a −2…+5 day window, one-to-one with the closest dates first, and gets a Groceries override. The pasted text, order numbers and card digits are never stored or logged; the redirect carries counts only. Sync updates transactions in place (`ON CONFLICT DO UPDATE`), so overrides survive modifications; a removed transaction cascades its override away. Don't change that upsert to `INSERT OR REPLACE`, which would delete overrides.
+  - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page, as rows from `2000-01`. Real amounts never go in code, fixtures or commits.
 
 ## Testing gotchas
 

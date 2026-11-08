@@ -32,6 +32,10 @@ export type TxRow = {
   quantity?: number;
   price?: number;
   fees?: number | null;
+  /** Budget category override for this transaction (cash rows; set by the Budgets page). */
+  budgetCategory?: string;
+  /** Where the override came from, e.g. "amazon". */
+  budgetCategorySource?: string;
 };
 
 type CashInput = {

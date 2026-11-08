@@ -192,9 +192,11 @@ describe("investment transactions store", () => {
     let db = await loadDb();
     db.saveItem("item-1", "access-sandbox-1", "Test Bank");
     db.applyTransactionSync(db.listItems()[0].id, syncResult());
-    // Roll back to v2: drop the v3 objects and reset the version.
+    // Roll back to v2: drop the v3 (and later) objects and reset the version.
     const raw = new Database(dbFile);
-    raw.exec(`DROP TABLE investment_transactions;
+    raw.exec(`DROP TABLE category_overrides;
+      DROP TABLE budgets;
+      DROP TABLE investment_transactions;
       ALTER TABLE items DROP COLUMN inv_synced_at;
       ALTER TABLE items DROP COLUMN inv_backfilled_at;
       ALTER TABLE items DROP COLUMN inv_status;`);
@@ -206,7 +208,7 @@ describe("investment transactions store", () => {
     expect(db.listTransactions()).toHaveLength(1);
     expect(db.listInvestmentTransactions()).toEqual([]);
     const check = new Database(dbFile, { readonly: true });
-    expect(check.pragma("user_version", { simple: true })).toBe(3);
+    expect(check.pragma("user_version", { simple: true })).toBe(db.SCHEMA_VERSION);
     check.close();
   });
 
@@ -292,5 +294,73 @@ describe("investment transactions store", () => {
     expect(db.listItems()[0]).toMatchObject({ invStatus: "PRODUCTS_NOT_SUPPORTED" });
     db.setInvestmentStatus(itemId, null);
     expect(db.listItems()[0]).toMatchObject({ invStatus: null, invSyncedAt: null });
+  });
+});
+
+describe("budgets store", () => {
+  it("migrates a v3 database to v4 keeping existing data", async () => {
+    let db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    const raw = new Database(dbFile);
+    raw.exec(`DROP TABLE category_overrides; DROP TABLE budgets;`);
+    raw.pragma("user_version = 3");
+    raw.close();
+
+    db = await loadDb();
+    expect(db.listItems()).toHaveLength(1);
+    expect(db.listBudgetEntries()).toEqual([]);
+    expect(db.SCHEMA_VERSION).toBeGreaterThanOrEqual(4);
+  });
+
+  it("keeps earlier months and replaces later ones, atomically per save", async () => {
+    const db = await loadDb();
+    db.setBudgetsFrom("2026-01", new Map([["dining", 200], ["shopping", 100]]));
+    db.setBudgetsFrom("2026-12", new Map([["dining", 400]]));
+    db.setBudgetsFrom("2026-10", new Map<string, number | null>([["dining", 300], ["shopping", null]]));
+    expect(db.listBudgetEntries()).toEqual([
+      { category: "dining", fromMonth: "2026-01", amount: 200 },
+      { category: "dining", fromMonth: "2026-10", amount: 300 }, // December row superseded
+      { category: "shopping", fromMonth: "2026-01", amount: 100 },
+      { category: "shopping", fromMonth: "2026-10", amount: null },
+    ]);
+  });
+
+  it("stores amounts only as ciphertext, bound to category and month", async () => {
+    const db = await loadDb();
+    db.setBudgetsFrom("2026-01", new Map([["dining", 98765.43]]));
+    const bytes = [dbFile, `${dbFile}-wal`]
+      .filter(existsSync)
+      .map((f) => readFileSync(f).toString("latin1"))
+      .join("");
+    expect(bytes).not.toContain("98765.43");
+
+    // Moving a ciphertext to another month fails authentication (AAD).
+    const raw = new Database(dbFile);
+    raw.prepare(`UPDATE budgets SET from_month = '2026-02' WHERE category = 'dining'`).run();
+    raw.close();
+    expect(() => db.listBudgetEntries()).toThrow();
+  });
+});
+
+describe("category overrides", () => {
+  it("stores overrides encrypted, keyed to the transaction, and drops them with it", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    const itemId = db.listItems()[0].id;
+    db.applyTransactionSync(itemId, syncResult());
+    const txId = db.listTransactions()[0].id;
+
+    expect(db.setCategoryOverrides(new Map([[txId, { category: "groceries", source: "amazon" as const }], [99999, { category: "groceries", source: "amazon" as const }]]))).toBe(1);
+    expect([...db.listCategoryOverrides()]).toEqual([[txId, { category: "groceries", source: "amazon" }]]);
+
+    const bytes = [dbFile, `${dbFile}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+    expect(bytes).not.toContain("groceries");
+
+    // A modification (upsert) keeps the override; a removal cascades.
+    const plaidId = syncResult().added[0].plaidTransactionId;
+    db.applyTransactionSync(itemId, syncResult({ added: [], modified: syncResult().added, nextCursor: "c2" }));
+    expect(db.listCategoryOverrides().size).toBe(1);
+    db.applyTransactionSync(itemId, syncResult({ added: [], removed: [plaidId], nextCursor: "c3" }));
+    expect(db.listCategoryOverrides().size).toBe(0);
   });
 });

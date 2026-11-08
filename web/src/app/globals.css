@@ -141,3 +141,24 @@ select {
 .chart .hover { opacity: 0; pointer-events: none; }
 .chart .hit:hover .hover { opacity: 1; }
 .total-row td { border-top: 2px solid var(--border); }
+
+/* Budgets */
+.month-nav { gap: 16px; }
+.month-nav a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+.budgets td:first-child a { color: var(--fg); text-decoration: none; }
+.budgets td:first-child a:hover { text-decoration: underline; }
+.budgets input.amount { width: 7.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.budgets input.amount.invalid { border-color: var(--error); }
+.bar { height: 4px; border-radius: 2px; background: var(--border); margin-top: 6px; max-width: 220px; overflow: hidden; }
+.bar > span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+.bar.over > span { background: var(--loss); }
+.form-actions { margin-top: 12px; }
+details.category { border-bottom: 1px solid var(--border); padding: 8px 0; }
+details.category > summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
+details.category > summary::-webkit-details-marker { display: none; }
+details.category > summary::before { content: "▸"; color: var(--muted); margin-right: -4px; }
+details.category[open] > summary::before { content: "▾"; }
+details.category > summary > span:first-of-type { flex: 1; }
+textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 0.85rem ui-monospace, monospace; }
+#amazon summary { cursor: pointer; }

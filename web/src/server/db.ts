@@ -31,6 +31,8 @@ function defaultDbPath(): string {
  *   accounts.data_enc             ("acct:" + plaid_account_id)  name, mask, type, subtype
  *   transactions.data_enc         ("tx:" + plaid_transaction_id) name, merchant, amount, category…
  *   investment_transactions.data_enc ("itx:" + plaid id) name, type, ticker, quantity, amount…
+ *   budgets.amount_enc            ("budget:" + category + ":" + from_month) amount or null
+ *   category_overrides.data_enc   ("ovr:" + plaid_transaction_id)  budget category, source
  * Readable: opaque Plaid ids, sync cursor/status/time, transaction date and pending flag.
  */
 const MIGRATIONS: ((db: Db) => void)[] = [
@@ -85,6 +87,30 @@ const MIGRATIONS: ((db: Db) => void)[] = [
       );
       CREATE INDEX investment_transactions_date ON investment_transactions(date DESC);
       CREATE INDEX investment_transactions_item_date ON investment_transactions(item_id, date);
+    `),
+  // v4: effective-dated monthly budgets. A row sets a category's amount (or "no budget")
+  // from `from_month` (YYYY-MM) until the category's next row; history stays put so
+  // carryover for past months never changes. Category ids come from src/lib/budgets.ts.
+  (db) =>
+    db.exec(`
+      CREATE TABLE budgets (
+        category   TEXT NOT NULL,
+        from_month TEXT NOT NULL,
+        amount_enc BLOB NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (category, from_month)
+      );
+    `),
+  // v5: per-transaction budget category overrides (e.g. from the Amazon import). Deleted with
+  // their transaction; sync updates transactions in place, so overrides survive modifications.
+  (db) =>
+    db.exec(`
+      CREATE TABLE category_overrides (
+        plaid_transaction_id TEXT PRIMARY KEY
+          REFERENCES transactions(plaid_transaction_id) ON DELETE CASCADE,
+        data_enc   BLOB NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `),
 ];
 
@@ -436,4 +462,85 @@ export function listTransactions(): StoredTransaction[] {
     pending: r.pending === 1,
     ...openJson<TransactionData>(r.data_enc, k, `tx:${r.plaid_transaction_id}`),
   }));
+}
+
+// ---------------------------------------------------------------- budgets
+
+/** One effective-dated budget row: `amount` applies from `fromMonth` on; null = no budget. */
+export type StoredBudgetEntry = { category: string; fromMonth: string; amount: number | null };
+
+export function listBudgetEntries(): StoredBudgetEntry[] {
+  const rows = getDb()
+    .prepare(`SELECT category, from_month, amount_enc FROM budgets ORDER BY category, from_month`)
+    .all() as { category: string; from_month: string; amount_enc: Buffer }[];
+  const k = key();
+  return rows.map((r) => ({
+    category: r.category,
+    fromMonth: r.from_month,
+    amount: openJson<number | null>(r.amount_enc, k, `budget:${r.category}:${r.from_month}`),
+  }));
+}
+
+/**
+ * Set amounts that apply from `fromMonth` onward, in one transaction: each given category's
+ * later rows are removed (the new amount holds going forward) and earlier rows are kept, so
+ * past months keep the budget they had. Callers validate ids, month and amounts.
+ */
+export function setBudgetsFrom(fromMonth: string, amounts: Map<string, number | null>): void {
+  const conn = getDb();
+  const k = key();
+  const removeLater = conn.prepare(`DELETE FROM budgets WHERE category = ? AND from_month > ?`);
+  const upsert = conn.prepare(
+    `INSERT INTO budgets (category, from_month, amount_enc, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(category, from_month) DO UPDATE SET amount_enc = excluded.amount_enc, updated_at = excluded.updated_at`,
+  );
+  conn.transaction(() => {
+    for (const [category, amount] of amounts) {
+      removeLater.run(category, fromMonth);
+      upsert.run(category, fromMonth, sealJson(amount, k, `budget:${category}:${fromMonth}`));
+    }
+  })();
+}
+
+// ---------------------------------------------------------------- category overrides
+
+/** A budget category chosen for one transaction instead of the Plaid-derived one. */
+export type CategoryOverride = { category: string; source: "amazon" };
+
+/** Overrides keyed by internal transaction id. */
+export function listCategoryOverrides(): Map<number, CategoryOverride> {
+  const rows = getDb()
+    .prepare(
+      `SELECT t.rowid AS id, o.plaid_transaction_id, o.data_enc
+       FROM category_overrides o JOIN transactions t USING (plaid_transaction_id)`,
+    )
+    .all() as { id: number; plaid_transaction_id: string; data_enc: Buffer }[];
+  const k = key();
+  return new Map(
+    rows.map((r) => [r.id, openJson<CategoryOverride>(r.data_enc, k, `ovr:${r.plaid_transaction_id}`)]),
+  );
+}
+
+/**
+ * Upsert overrides by internal transaction id, in one transaction. Unknown ids are skipped.
+ * Callers validate categories. Returns how many were written.
+ */
+export function setCategoryOverrides(overrides: Map<number, CategoryOverride>): number {
+  const conn = getDb();
+  const k = key();
+  const lookup = conn.prepare(`SELECT plaid_transaction_id FROM transactions WHERE rowid = ?`);
+  const upsert = conn.prepare(
+    `INSERT INTO category_overrides (plaid_transaction_id, data_enc, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(plaid_transaction_id) DO UPDATE SET data_enc = excluded.data_enc, updated_at = excluded.updated_at`,
+  );
+  let written = 0;
+  conn.transaction(() => {
+    for (const [id, o] of overrides) {
+      const row = lookup.get(id) as { plaid_transaction_id: string } | undefined;
+      if (!row) continue;
+      upsert.run(row.plaid_transaction_id, sealJson(o, k, `ovr:${row.plaid_transaction_id}`));
+      written++;
+    }
+  })();
+  return written;
 }
