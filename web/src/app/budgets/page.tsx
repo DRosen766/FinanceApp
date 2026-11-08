@@ -12,11 +12,16 @@ import {
   type CategoryLine,
 } from "@/lib/budgets";
 import { prettyCategory, rowKey, toCashRow, type TxRow } from "@/lib/transactions";
-import { listAccounts, listBudgetEntries, listTransactions } from "@/server/db";
+import {
+  listAccounts,
+  listBudgetEntries,
+  listCategoryOverrides,
+  listTransactions,
+} from "@/server/db";
 import { requireSession } from "@/server/session";
 import { syncAllItems } from "@/server/transactions-sync";
 import { Nav } from "../Nav";
-import { saveBudgets } from "./actions";
+import { importAmazonOrders, saveBudgets } from "./actions";
 
 function formatDate(iso: string) {
   return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US", {
@@ -96,7 +101,10 @@ function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: numbe
                 {t.merchantName ?? t.name}
                 {t.pending && <span className="badge">Pending</span>}
                 <div className="muted small">
-                  {accountName(t.accountId)} · {prettyCategory(t.categoryDetailed ?? t.category)}
+                  {accountName(t.accountId)} ·{" "}
+                  {t.budgetCategorySource === "amazon"
+                    ? "Amazon grocery order"
+                    : prettyCategory(t.categoryDetailed ?? t.category)}
                 </div>
               </td>
               {/* Same convention as the Transactions page: money out −, money in +. */}
@@ -106,6 +114,63 @@ function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: numbe
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** "parsed-orders-charges-matched", all integers; anything else is ignored. */
+function AmazonResult({ result }: { result: string }) {
+  if (result === "invalid") {
+    return <p className="error">Nothing imported: paste the text of the Amazon Transactions page.</p>;
+  }
+  const m = /^(\d{1,5})-(\d{1,5})-(\d{1,5})-(\d{1,5})$/.exec(result);
+  if (!m) return null;
+  const [parsed, orders, charges, matched] = m.slice(1).map(Number);
+  if (parsed === 0) {
+    return <p className="error">No Amazon charges found in that text. Copy the whole Transactions page.</p>;
+  }
+  return (
+    <p className="muted">
+      Read {parsed} Amazon charges: {orders} grocery {orders === 1 ? "order" : "orders"} (with a delivery
+      tip), {charges} grocery {charges === 1 ? "charge" : "charges"}, {matched} matched to your bank
+      transactions and marked Groceries.
+      {charges > matched &&
+        " Unmatched ones are on an unlinked card, still pending, or older than your synced history."}
+    </p>
+  );
+}
+
+function AmazonImport({ month, result }: { month: string; result?: string }) {
+  return (
+    <section className="card" id="amazon">
+      <details open={result !== undefined}>
+        <summary>
+          <strong>Import Amazon grocery orders</strong>
+        </summary>
+        <p className="muted small">
+          Your bank shows every Amazon order the same way. On amazon.com go to Your Account → Your
+          Payments → Transactions, select the whole list, copy it, and paste it here. Orders that took a
+          delivery tip (Whole Foods / Amazon Fresh) are matched to your bank transactions by card,
+          amount and date, and counted as Groceries. The pasted text isn&apos;t saved.
+        </p>
+        {result !== undefined && <AmazonResult result={result} />}
+        <form action={importAmazonOrders} className="stack">
+          <input type="hidden" name="month" value={month} />
+          <textarea
+            name="amazon"
+            rows={6}
+            required
+            maxLength={500000}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder={"Nov 01, 2026·Amazon Tips\nVisa••••1234\nOrder #…\n-$5.00\nCharged"}
+            aria-label="Amazon transactions page text"
+          />
+          <div>
+            <button type="submit">Import</button>
+          </div>
+        </form>
+      </details>
+    </section>
   );
 }
 
@@ -120,7 +185,11 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
   await syncAllItems();
 
   const stored = listTransactions();
-  const rows = stored.map(toCashRow);
+  const overrides = listCategoryOverrides();
+  const rows = stored.map((t): TxRow => {
+    const o = overrides.get(t.id);
+    return o ? { ...toCashRow(t), budgetCategory: o.category, budgetCategorySource: o.source } : toCashRow(t);
+  });
   const historyStart = stored.length ? stored.reduce((m, t) => (t.date < m ? t.date : m), stored[0].date) : null;
   const accounts = new Map(listAccounts().map((a) => [a.id, a]));
   // Earliest stored date per linked item: carryover starts once every item has history.
@@ -312,6 +381,8 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
           )}
         </details>
       </section>
+
+      <AmazonImport month={month} result={typeof params.amz === "string" ? params.amz : undefined} />
 
       <p className="footnote muted">
         {summary.trackingStart

@@ -160,3 +160,5 @@ details.category > summary::-webkit-details-marker { display: none; }
 details.category > summary::before { content: "▸"; color: var(--muted); margin-right: -4px; }
 details.category[open] > summary::before { content: "▾"; }
 details.category > summary > span:first-of-type { flex: 1; }
+textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 0.85rem ui-monospace, monospace; }
+#amazon summary { cursor: pointer; }

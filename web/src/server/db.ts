@@ -32,6 +32,7 @@ function defaultDbPath(): string {
  *   transactions.data_enc         ("tx:" + plaid_transaction_id) name, merchant, amount, category…
  *   investment_transactions.data_enc ("itx:" + plaid id) name, type, ticker, quantity, amount…
  *   budgets.amount_enc            ("budget:" + category + ":" + from_month) amount or null
+ *   category_overrides.data_enc   ("ovr:" + plaid_transaction_id)  budget category, source
  * Readable: opaque Plaid ids, sync cursor/status/time, transaction date and pending flag.
  */
 const MIGRATIONS: ((db: Db) => void)[] = [
@@ -98,6 +99,17 @@ const MIGRATIONS: ((db: Db) => void)[] = [
         amount_enc BLOB NOT NULL,
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (category, from_month)
+      );
+    `),
+  // v5: per-transaction budget category overrides (e.g. from the Amazon import). Deleted with
+  // their transaction; sync updates transactions in place, so overrides survive modifications.
+  (db) =>
+    db.exec(`
+      CREATE TABLE category_overrides (
+        plaid_transaction_id TEXT PRIMARY KEY
+          REFERENCES transactions(plaid_transaction_id) ON DELETE CASCADE,
+        data_enc   BLOB NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `),
 ];
@@ -488,4 +500,47 @@ export function setBudgetsFrom(fromMonth: string, amounts: Map<string, number | 
       upsert.run(category, fromMonth, sealJson(amount, k, `budget:${category}:${fromMonth}`));
     }
   })();
+}
+
+// ---------------------------------------------------------------- category overrides
+
+/** A budget category chosen for one transaction instead of the Plaid-derived one. */
+export type CategoryOverride = { category: string; source: "amazon" };
+
+/** Overrides keyed by internal transaction id. */
+export function listCategoryOverrides(): Map<number, CategoryOverride> {
+  const rows = getDb()
+    .prepare(
+      `SELECT t.rowid AS id, o.plaid_transaction_id, o.data_enc
+       FROM category_overrides o JOIN transactions t USING (plaid_transaction_id)`,
+    )
+    .all() as { id: number; plaid_transaction_id: string; data_enc: Buffer }[];
+  const k = key();
+  return new Map(
+    rows.map((r) => [r.id, openJson<CategoryOverride>(r.data_enc, k, `ovr:${r.plaid_transaction_id}`)]),
+  );
+}
+
+/**
+ * Upsert overrides by internal transaction id, in one transaction. Unknown ids are skipped.
+ * Callers validate categories. Returns how many were written.
+ */
+export function setCategoryOverrides(overrides: Map<number, CategoryOverride>): number {
+  const conn = getDb();
+  const k = key();
+  const lookup = conn.prepare(`SELECT plaid_transaction_id FROM transactions WHERE rowid = ?`);
+  const upsert = conn.prepare(
+    `INSERT INTO category_overrides (plaid_transaction_id, data_enc, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(plaid_transaction_id) DO UPDATE SET data_enc = excluded.data_enc, updated_at = excluded.updated_at`,
+  );
+  let written = 0;
+  conn.transaction(() => {
+    for (const [id, o] of overrides) {
+      const row = lookup.get(id) as { plaid_transaction_id: string } | undefined;
+      if (!row) continue;
+      upsert.run(row.plaid_transaction_id, sealJson(o, k, `ovr:${row.plaid_transaction_id}`));
+      written++;
+    }
+  })();
+  return written;
 }

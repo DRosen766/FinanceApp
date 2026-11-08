@@ -31,6 +31,13 @@ export const isCategoryId = (v: string): v is CategoryId => ID_SET.has(v);
 export const TRANSFER = "transfer" as const;
 export type Assignment = CategoryId | typeof TRANSFER;
 
+// Descriptor rules, checked before Plaid's category. Keep these generic (merchant-level),
+// never tied to the owner's own data.
+const BY_NAME: [RegExp, CategoryId][] = [
+  // Only Whole Foods / Amazon Fresh deliveries take tips.
+  [/\bamazon tips?\b/i, "groceries"],
+];
+
 // Plaid personal_finance_category → budget category. Detailed wins over primary.
 const BY_DETAILED: Record<string, Assignment> = {
   // Card purchases are already counted as spending; paying the card is not new spending.
@@ -57,12 +64,16 @@ const BY_PRIMARY: Record<string, Assignment> = {
 };
 
 /**
- * Budget category for a row, or null when the row isn't part of budgeting at all.
+ * Budget category for a row, or null when the row isn't part of budgeting at all. Order: a
+ * per-transaction override (row.budgetCategory), descriptor rules, then Plaid's category.
  * Investment activity (buys, sells, dividends inside a brokerage) is not budgeted; money
  * moving into or out of a brokerage shows up on the cash side as a transfer.
  */
 export function categorize(row: TxRow): Assignment | null {
   if (row.kind !== "cash") return null;
+  if (row.budgetCategory && isCategoryId(row.budgetCategory)) return row.budgetCategory;
+  const text = `${row.merchantName ?? ""} ${row.name}`;
+  for (const [re, id] of BY_NAME) if (re.test(text)) return id;
   if (row.categoryDetailed && BY_DETAILED[row.categoryDetailed]) return BY_DETAILED[row.categoryDetailed];
   if (row.category && BY_PRIMARY[row.category]) return BY_PRIMARY[row.category];
   return "everything_else";

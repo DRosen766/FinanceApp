@@ -68,6 +68,23 @@ describe("categorize", () => {
     expect(categorize(cash("2026-11-01", 10, primary, detailed))).toBe(expected);
   });
 
+  it("applies a per-transaction override before anything else", () => {
+    const r = cash("2026-11-01", 10, "GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", {
+      budgetCategory: "groceries",
+    });
+    expect(categorize(r)).toBe("groceries");
+    // An unknown override id is ignored rather than trusted.
+    expect(categorize({ ...r, budgetCategory: "bogus" })).toBe("shopping");
+  });
+
+  it("counts Amazon delivery tips as groceries", () => {
+    const r = cash("2026-11-01", 5, "GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", {
+      name: "Amazon Tips*AB12CD",
+      merchantName: "Amazon",
+    });
+    expect(categorize(r)).toBe("groceries");
+  });
+
   it("leaves investment activity out of budgets", () => {
     expect(categorize(cash("2026-11-01", 10, "dividend", null, { kind: "investment" }))).toBeNull();
   });
