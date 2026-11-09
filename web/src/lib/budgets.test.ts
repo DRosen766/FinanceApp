@@ -85,6 +85,28 @@ describe("categorize", () => {
     expect(categorize(r)).toBe("groceries");
   });
 
+  it.each([
+    ["Anthropic", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["OpenAI", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["GitHub", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Amazon Web Services", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Rocket Money", "GENERAL_SERVICES_ACCOUNTING_AND_FINANCIAL_PLANNING", "software"],
+    ["Any.do", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Amazon", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", "shopping"], // plain Amazon isn't AWS
+    ["Supercuts", "PERSONAL_CARE_HAIR_AND_BEAUTY", "personal_care"], // not "supa"
+    ["Notional Plumbing", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "everything_else"],
+  ])("merchant %s (%s) → %s", (merchant, detailed, expected) => {
+    const r = cash("2026-11-01", 10, detailed.split("_").slice(0, 2).join("_"), detailed, { merchantName: merchant });
+    expect(categorize(r)).toBe(expected);
+  });
+
+  it("counts card rewards as earnings and fund trades as transfers", () => {
+    expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-CASH BACK REWARD" }))).toBe("earnings");
+    expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-TRAVEL REWARD" }))).toBe("earnings");
+    expect(categorize(cash("2026-11-01", -900, "OTHER", "OTHER_OTHER", { name: "YOU SOLD SOME FUND" }))).toBe(TRANSFER);
+    expect(categorize(cash("2026-11-01", 900, "OTHER", "OTHER_OTHER", { name: "YOU BOUGHT SOME FUND" }))).toBe(TRANSFER);
+  });
+
   it("leaves investment activity out of budgets", () => {
     expect(categorize(cash("2026-11-01", 10, "dividend", null, { kind: "investment" }))).toBeNull();
   });

@@ -33,9 +33,20 @@ export type Assignment = CategoryId | typeof TRANSFER;
 
 // Descriptor rules, checked before Plaid's category. Keep these generic (merchant-level),
 // never tied to the owner's own data.
-const BY_NAME: [RegExp, CategoryId][] = [
+const BY_NAME: [RegExp, Assignment][] = [
   // Only Whole Foods / Amazon Fresh deliveries take tips.
   [/\bamazon tips?\b/i, "groceries"],
+  // Software, SaaS and cloud vendors. Plaid files most of these under
+  // GENERAL_SERVICES_OTHER_GENERAL_SERVICES, which also holds unrelated services, so match the
+  // vendor. Checked before Plaid's category so AWS doesn't land in Shopping with other Amazon.
+  [
+    /\b(amazon web services|aws|anthropic|claude\.ai|openai|chatgpt|github|gitlab|vercel|netlify|heroku|cloudflare|digitalocean|linode|supabase|supa|google (cloud|workspace|one|storage)|gsuite|microsoft|msft|apple\.com\/bill|icloud|adobe|dropbox|notion|obsidian|any\.do|todoist|evernote|1password|lastpass|bitwarden|nordvpn|expressvpn|jetbrains|cursor|figma|canva|zoom\.us|slack|elevenlabs|perplexity|midjourney|rocket money|squarespace|godaddy|namecheap|backblaze)\b/i,
+    "software",
+  ],
+  // Card rewards are money in, not a refund of whatever Plaid guessed (usually OTHER_OTHER).
+  [/\b(cash ?back|travel|statement) rewards?\b|\brewards? (credit|redemption)\b/i, "earnings"],
+  // Fund trades settling in a cash-management account move money between your own holdings.
+  [/\byou (sold|bought)\b/i, TRANSFER],
 ];
 
 // Plaid personal_finance_category → budget category. Detailed wins over primary.
