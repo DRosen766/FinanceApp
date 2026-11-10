@@ -2,7 +2,11 @@ import Link from "next/link";
 import { money, signedMoney } from "@/lib/format";
 import {
   addMonths,
+  assignmentLabel,
+  AUTO,
   BUDGET_FIELD_PREFIX,
+  categorize,
+  isAssignment,
   isCategoryId,
   monthLabel,
   monthOf,
@@ -22,6 +26,7 @@ import { requireSession } from "@/server/session";
 import { syncAllItems } from "@/server/transactions-sync";
 import { Nav } from "../Nav";
 import { importAmazonOrders, saveBudgets } from "./actions";
+import { CategorySelect } from "./CategorySelect";
 
 function formatDate(iso: string) {
   return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US", {
@@ -89,6 +94,14 @@ function CategoryRow({ line, invalid }: { line: CategoryLine; invalid: boolean }
   );
 }
 
+/** The row's category without a manual choice (an Amazon match still counts as automatic). */
+function automatic(t: TxRow): string {
+  const auto = t.budgetCategorySource === "manual" ? { ...t, budgetCategory: undefined } : t;
+  const a = categorize(auto);
+  if (a === null) return "Not budgeted";
+  return t.budgetCategorySource === "amazon" ? `${assignmentLabel(a)} (Amazon order)` : assignmentLabel(a);
+}
+
 function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: number) => string }) {
   return (
     <div className="table-scroll">
@@ -105,7 +118,23 @@ function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: numbe
                   {t.budgetCategorySource === "amazon"
                     ? "Amazon grocery order"
                     : prettyCategory(t.categoryDetailed ?? t.category)}
+                  {t.budgetCategorySource === "manual" && " · set by you"}
                 </div>
+              </td>
+              <td className="nowrap">
+                <CategorySelect
+                  id={t.id}
+                  value={
+                    t.budgetCategorySource === "manual" && t.budgetCategory && isAssignment(t.budgetCategory)
+                      ? t.budgetCategory
+                      : AUTO
+                  }
+                  autoLabel={automatic(t)}
+                  label={`${t.merchantName ?? t.name}, ${formatDate(t.date)}`}
+                  disabledReason={
+                    t.pending ? "Pending: you can change the category once it posts (the bank replaces pending rows)." : undefined
+                  }
+                />
               </td>
               {/* Same convention as the Transactions page: money out −, money in +. */}
               <td className={`num nowrap ${t.amount < 0 ? "gain" : ""}`}>{signedMoney(-t.amount, t.currency)}</td>
@@ -388,7 +417,8 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
         {summary.trackingStart
           ? `Carryover is a running tally since ${monthLabel(summary.trackingStart)}, the first full month with history from every linked account: each month's unspent budget rolls forward, and overspending rolls forward as a deficit. `
           : "Carryover starts once transactions have synced. "}
-        Categories come from Plaid&apos;s category on each transaction. Card purchases count as
+        Categories come from Plaid&apos;s category on each transaction; change any one with its
+        dropdown, and your choice sticks through syncs and Amazon imports. Card purchases count as
         spending, so credit card payments and transfers between your own accounts are not budgeted.
         Refunds reduce their category&apos;s spending. Pending transactions are included. Activity
         inside investment accounts (buys, sells, dividends) is not part of budgets.

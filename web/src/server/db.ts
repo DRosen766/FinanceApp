@@ -505,7 +505,11 @@ export function setBudgetsFrom(fromMonth: string, amounts: Map<string, number | 
 // ---------------------------------------------------------------- category overrides
 
 /** A budget category chosen for one transaction instead of the Plaid-derived one. */
-export type CategoryOverride = { category: string; source: "amazon" };
+export type CategoryOverride = {
+  category: string;
+  /** "manual" = picked by the owner; it wins over (and is never replaced by) an import. */
+  source: "amazon" | "manual";
+};
 
 /** Overrides keyed by internal transaction id. */
 export function listCategoryOverrides(): Map<number, CategoryOverride> {
@@ -543,4 +547,15 @@ export function setCategoryOverrides(overrides: Map<number, CategoryOverride>): 
     }
   })();
   return written;
+}
+
+/** Remove a transaction's override (back to the automatic category). Returns whether one existed. */
+export function deleteCategoryOverride(id: number): boolean {
+  const res = getDb()
+    .prepare(
+      `DELETE FROM category_overrides
+       WHERE plaid_transaction_id = (SELECT plaid_transaction_id FROM transactions WHERE rowid = ?)`,
+    )
+    .run(id);
+  return res.changes > 0;
 }

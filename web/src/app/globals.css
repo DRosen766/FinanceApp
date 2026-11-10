@@ -161,4 +161,6 @@ details.category > summary::before { content: "▸"; color: var(--muted); margin
 details.category[open] > summary::before { content: "▾"; }
 details.category > summary > span:first-of-type { flex: 1; }
 textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 0.85rem ui-monospace, monospace; }
+.category-select { max-width: 12em; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 0.8rem; }
+.category-select:disabled { opacity: 0.6; }
 #amazon summary { cursor: pointer; }
