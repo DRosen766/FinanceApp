@@ -63,7 +63,7 @@ export function splitExamples(examples: Example[], seed: string, fraction: numbe
 
 // ---------------------------------------------------------------- prompt
 
-const DESCRIPTIONS: Record<Assignment, string> = {
+export const DESCRIPTIONS: Record<Assignment, string> = {
   earnings: "income: paychecks, direct deposits, interest, refunds of taxes",
   bills: "rent, utilities, phone, internet, insurance, loan payments",
   dining: "restaurants, cafes, bars, fast food, food delivery",
@@ -78,6 +78,7 @@ const DESCRIPTIONS: Record<Assignment, string> = {
   transit: "public transit, gas, parking, tolls, car costs",
   travel: "flights, hotels, rental cars, vacation spending",
   everything_else: "anything that fits no other category",
+  education: "tuition, courses, school and university fees, textbooks",
   transfer: "moving money between the owner's own accounts, credit card payments, brokerage deposits",
 };
 
