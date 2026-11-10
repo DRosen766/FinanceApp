@@ -47,6 +47,8 @@ const BY_NAME: [RegExp, Assignment][] = [
   [/\b(cash ?back|travel|statement) rewards?\b|\brewards? (credit|redemption)\b/i, "earnings"],
   // Fund trades settling in a cash-management account move money between your own holdings.
   [/\byou (sold|bought)\b/i, TRANSFER],
+  // Intercity rail and coach are trips, not commuting; Plaid files them as PUBLIC_TRANSIT.
+  [/\b(amtrak|via rail|greyhound|megabus|flixbus|peter pan bus|brightline|acela)\b/i, "travel"],
 ];
 
 // Plaid personal_finance_category → budget category. Detailed wins over primary.

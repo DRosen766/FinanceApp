@@ -100,6 +100,15 @@ describe("categorize", () => {
     expect(categorize(r)).toBe(expected);
   });
 
+  it("counts intercity rail as travel but keeps local transit in transit", () => {
+    const rail = (merchantName: string) =>
+      categorize(cash("2026-11-01", 50, "TRANSPORTATION", "TRANSPORTATION_PUBLIC_TRANSIT", { merchantName }));
+    expect(rail("Amtrak")).toBe("travel");
+    expect(rail("Greyhound")).toBe("travel");
+    expect(rail("SEPTA")).toBe("transit");
+    expect(rail("Metro Fare Autoload")).toBe("transit");
+  });
+
   it("counts card rewards as earnings and fund trades as transfers", () => {
     expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-CASH BACK REWARD" }))).toBe("earnings");
     expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-TRAVEL REWARD" }))).toBe("earnings");
