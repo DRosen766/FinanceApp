@@ -16,6 +16,10 @@ import {
   parseMonth,
   summarizeBudget,
   TRANSFER,
+  AUTO,
+  ASSIGNMENT_OPTIONS,
+  parseCategoryChoice,
+  BUDGETABLE_IDS,
 } from "./budgets";
 import type { TxRow } from "./transactions";
 
@@ -77,12 +81,48 @@ describe("categorize", () => {
     expect(categorize({ ...r, budgetCategory: "bogus" })).toBe("shopping");
   });
 
+  it("honors a manual Not budgeted override", () => {
+    const r = cash("2026-11-01", 10, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT", { budgetCategory: "transfer" });
+    expect(categorize(r)).toBe(TRANSFER);
+  });
+
   it("counts Amazon delivery tips as groceries", () => {
     const r = cash("2026-11-01", 5, "GENERAL_MERCHANDISE", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", {
       name: "Amazon Tips*AB12CD",
       merchantName: "Amazon",
     });
     expect(categorize(r)).toBe("groceries");
+  });
+
+  it.each([
+    ["Anthropic", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["OpenAI", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["GitHub", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Amazon Web Services", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Rocket Money", "GENERAL_SERVICES_ACCOUNTING_AND_FINANCIAL_PLANNING", "software"],
+    ["Any.do", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "software"],
+    ["Amazon", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", "shopping"], // plain Amazon isn't AWS
+    ["Supercuts", "PERSONAL_CARE_HAIR_AND_BEAUTY", "personal_care"], // not "supa"
+    ["Notional Plumbing", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", "everything_else"],
+  ])("merchant %s (%s) → %s", (merchant, detailed, expected) => {
+    const r = cash("2026-11-01", 10, detailed.split("_").slice(0, 2).join("_"), detailed, { merchantName: merchant });
+    expect(categorize(r)).toBe(expected);
+  });
+
+  it("counts intercity rail as travel but keeps local transit in transit", () => {
+    const rail = (merchantName: string) =>
+      categorize(cash("2026-11-01", 50, "TRANSPORTATION", "TRANSPORTATION_PUBLIC_TRANSIT", { merchantName }));
+    expect(rail("Amtrak")).toBe("travel");
+    expect(rail("Greyhound")).toBe("travel");
+    expect(rail("SEPTA")).toBe("transit");
+    expect(rail("Metro Fare Autoload")).toBe("transit");
+  });
+
+  it("counts card rewards as earnings and fund trades as transfers", () => {
+    expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-CASH BACK REWARD" }))).toBe("earnings");
+    expect(categorize(cash("2026-11-01", -5, "OTHER", "OTHER_OTHER", { name: "CREDIT-TRAVEL REWARD" }))).toBe("earnings");
+    expect(categorize(cash("2026-11-01", -900, "OTHER", "OTHER_OTHER", { name: "YOU SOLD SOME FUND" }))).toBe(TRANSFER);
+    expect(categorize(cash("2026-11-01", 900, "OTHER", "OTHER_OTHER", { name: "YOU BOUGHT SOME FUND" }))).toBe(TRANSFER);
   });
 
   it("leaves investment activity out of budgets", () => {
@@ -280,7 +320,7 @@ describe("parseBudgetForm", () => {
     expect(r.amounts.get("dining")).toBe(1250.5);
     expect(r.amounts.get("shopping")).toBe(300);
     expect(r.amounts.get("groceries")).toBeNull();
-    expect(r.amounts.size).toBe(CATEGORY_IDS.length);
+    expect(r.amounts.size).toBe(BUDGETABLE_IDS.length);
   });
 
   it.each(["-5", "1.234", "abc", "1e5", "Infinity", "99999999999", "0x10", "1 000"])("rejects %s", (v) => {
@@ -296,5 +336,65 @@ describe("parseBudgetForm", () => {
   it("ignores unknown fields, so a forged field never creates a category", () => {
     const r = parseBudgetForm(form({ budget_evil: "5", "budget___proto__": "5" }));
     expect(r.ok && [...r.amounts.keys()].every((k) => CATEGORY_IDS.includes(k))).toBe(true);
+  });
+});
+
+describe("parseCategoryChoice", () => {
+  const f = (id: string, category: string) => {
+    const d = new FormData();
+    d.set("id", id);
+    d.set("category", category);
+    return d;
+  };
+  it("accepts every option plus Automatic", () => {
+    for (const o of ASSIGNMENT_OPTIONS) expect(parseCategoryChoice(f("7", o.value))).toEqual({ id: 7, category: o.value });
+    expect(parseCategoryChoice(f("7", AUTO))).toEqual({ id: 7, category: AUTO });
+    expect(ASSIGNMENT_OPTIONS.map((o) => o.value)).toContain(TRANSFER);
+  });
+  it("rejects anything else", () => {
+    expect(parseCategoryChoice(f("7", "constructor"))).toBeNull();
+    expect(parseCategoryChoice(f("07", "dining"))).toBeNull();
+    expect(parseCategoryChoice(f("1e3", "dining"))).toBeNull();
+    expect(parseCategoryChoice(new FormData())).toBeNull();
+  });
+});
+
+describe("excluded categories", () => {
+  it("Education is excluded and Plaid's education category maps to it", () => {
+    expect(BUDGET_CATEGORIES.find((c) => c.id === "education")?.group).toBe("excluded");
+    expect(BUDGETABLE_IDS).not.toContain("education");
+    expect(categorize(cash("2026-11-01", 40, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"))).toBe("education");
+    expect(categorize(cash("2026-11-01", 40, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT", { budgetCategory: "education" }))).toBe("education");
+  });
+
+  it("are listed but never budgeted, carried over, or counted as spending", () => {
+    const rows = [
+      cash("2026-10-05", 100, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"),
+      cash("2026-11-02", 50, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
+      cash("2026-11-03", 400, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"),
+    ];
+    // Even a stray stored budget for an excluded category is ignored.
+    const entries: BudgetEntry[] = [
+      { category: "dining", fromMonth: "2000-01", amount: 200 },
+      { category: "education", fromMonth: "2000-01", amount: 1000 },
+    ];
+    const s = summarizeBudget(rows, "2026-11", entries, TODAY, "2026-08-01", "2026-09");
+    const edu = s.lines.find((l) => l.id === "education")!;
+    expect(edu).toMatchObject({ group: "excluded", actual: 400, budgeted: null, carryover: null, remaining: null });
+    expect(edu.rows).toHaveLength(1);
+    expect(s.excludedSpend).toBe(400);
+    expect(s.currentSpend).toBe(50);
+    expect(s.spendingBudget).toBe(200);
+    expect(s.carryover).toBe(400); // dining only: Sep 200 + Oct 200 unspent
+    expect(s.remaining).toBe(550);
+    expect(carryoverInto(monthlyActuals(rows), entries, "2026-09", "2026-11").has("education")).toBe(false);
+  });
+
+  it("have no budget field: the form ignores one if sent", () => {
+    const m = new Map<string, string>();
+    for (const id of BUDGETABLE_IDS) m.set(BUDGET_FIELD_PREFIX + id, "");
+    m.set(BUDGET_FIELD_PREFIX + "education", "500");
+    const r = parseBudgetForm({ get: (n: string) => m.get(n) ?? null });
+    expect(r.ok && r.amounts.has("education")).toBe(false);
   });
 });

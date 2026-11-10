@@ -2,7 +2,8 @@
 // No secrets, no I/O. Budget amounts themselves live encrypted in the DB (server/db.ts).
 import type { TxRow } from "./transactions";
 
-export type BudgetGroup = "basics" | "spending";
+/** "excluded": tracked and listed, but never budgeted and not counted in monthly spending. */
+export type BudgetGroup = "basics" | "spending" | "excluded";
 
 /** Budget categories, in display order. Ids are stored in the DB: never rename a shipped id. */
 export const BUDGET_CATEGORIES = [
@@ -20,22 +21,66 @@ export const BUDGET_CATEGORIES = [
   { id: "transit", name: "Transit", group: "spending" },
   { id: "travel", name: "Travel & Vacation", group: "spending" },
   { id: "everything_else", name: "Everything Else", group: "spending" },
+  { id: "education", name: "Education", group: "excluded" },
 ] as const satisfies readonly { id: string; name: string; group: BudgetGroup }[];
 
 export type CategoryId = (typeof BUDGET_CATEGORIES)[number]["id"];
 export const CATEGORY_IDS: readonly CategoryId[] = BUDGET_CATEGORIES.map((c) => c.id);
 const ID_SET = new Set<string>(CATEGORY_IDS);
 export const isCategoryId = (v: string): v is CategoryId => ID_SET.has(v);
+const EXCLUDED = new Set<string>(BUDGET_CATEGORIES.filter((c) => c.group === "excluded").map((c) => c.id));
+export const isExcluded = (id: string) => EXCLUDED.has(id);
+/** Categories that take a budget (everything except the excluded group). */
+export const BUDGETABLE_IDS: readonly CategoryId[] = CATEGORY_IDS.filter((id) => !EXCLUDED.has(id));
 
 /** Not budgeted: moves money between your own accounts (or pays a card already counted). */
 export const TRANSFER = "transfer" as const;
 export type Assignment = CategoryId | typeof TRANSFER;
+export const isAssignment = (v: string): v is Assignment => v === TRANSFER || ID_SET.has(v);
+
+/** Dropdown value meaning "no manual choice: use the automatic category". */
+export const AUTO = "auto" as const;
+/** What a transaction's category can be set to by hand, in display order. */
+export const ASSIGNMENT_OPTIONS: readonly { value: Assignment; label: string }[] = [
+  ...BUDGET_CATEGORIES.map((c) => ({ value: c.id, label: c.name })),
+  { value: TRANSFER, label: "Not budgeted" },
+];
+export const assignmentLabel = (a: Assignment): string =>
+  ASSIGNMENT_OPTIONS.find((o) => o.value === a)?.label ?? a;
+
+/**
+ * Parse the manual-category form: a positive integer transaction id and either AUTO (clear the
+ * manual choice) or a known assignment. Anything else is rejected.
+ */
+export function parseCategoryChoice(
+  form: FormData,
+): { id: number; category: Assignment | typeof AUTO } | null {
+  const id = form.get("id");
+  const category = form.get("category");
+  if (typeof id !== "string" || !/^[1-9]\d{0,15}$/.test(id)) return null;
+  if (typeof category !== "string" || (category !== AUTO && !isAssignment(category))) return null;
+  const n = Number(id);
+  return Number.isSafeInteger(n) ? { id: n, category } : null;
+}
 
 // Descriptor rules, checked before Plaid's category. Keep these generic (merchant-level),
 // never tied to the owner's own data.
-const BY_NAME: [RegExp, CategoryId][] = [
+const BY_NAME: [RegExp, Assignment][] = [
   // Only Whole Foods / Amazon Fresh deliveries take tips.
   [/\bamazon tips?\b/i, "groceries"],
+  // Software, SaaS and cloud vendors. Plaid files most of these under
+  // GENERAL_SERVICES_OTHER_GENERAL_SERVICES, which also holds unrelated services, so match the
+  // vendor. Checked before Plaid's category so AWS doesn't land in Shopping with other Amazon.
+  [
+    /\b(amazon web services|aws|anthropic|claude\.ai|openai|chatgpt|github|gitlab|vercel|netlify|heroku|cloudflare|digitalocean|linode|supabase|supa|google (cloud|workspace|one|storage)|gsuite|microsoft|msft|apple\.com\/bill|icloud|adobe|dropbox|notion|obsidian|any\.do|todoist|evernote|1password|lastpass|bitwarden|nordvpn|expressvpn|jetbrains|cursor|figma|canva|zoom\.us|slack|elevenlabs|perplexity|midjourney|rocket money|squarespace|godaddy|namecheap|backblaze)\b/i,
+    "software",
+  ],
+  // Card rewards are money in, not a refund of whatever Plaid guessed (usually OTHER_OTHER).
+  [/\b(cash ?back|travel|statement) rewards?\b|\brewards? (credit|redemption)\b/i, "earnings"],
+  // Fund trades settling in a cash-management account move money between your own holdings.
+  [/\byou (sold|bought)\b/i, TRANSFER],
+  // Intercity rail and coach are trips, not commuting; Plaid files them as PUBLIC_TRANSIT.
+  [/\b(amtrak|via rail|greyhound|megabus|flixbus|peter pan bus|brightline|acela)\b/i, "travel"],
 ];
 
 // Plaid personal_finance_category → budget category. Detailed wins over primary.
@@ -46,6 +91,7 @@ const BY_DETAILED: Record<string, Assignment> = {
   GENERAL_MERCHANDISE_CONVENIENCE_STORES: "groceries",
   GENERAL_MERCHANDISE_ELECTRONICS: "software",
   GENERAL_SERVICES_INSURANCE: "bills",
+  GENERAL_SERVICES_EDUCATION: "education",
   TRANSPORTATION_TAXIS_AND_RIDE_SHARES: "rideshare",
 };
 const BY_PRIMARY: Record<string, Assignment> = {
@@ -71,7 +117,7 @@ const BY_PRIMARY: Record<string, Assignment> = {
  */
 export function categorize(row: TxRow): Assignment | null {
   if (row.kind !== "cash") return null;
-  if (row.budgetCategory && isCategoryId(row.budgetCategory)) return row.budgetCategory;
+  if (row.budgetCategory && isAssignment(row.budgetCategory)) return row.budgetCategory;
   const text = `${row.merchantName ?? ""} ${row.name}`;
   for (const [re, id] of BY_NAME) if (re.test(text)) return id;
   if (row.categoryDetailed && BY_DETAILED[row.categoryDetailed]) return BY_DETAILED[row.categoryDetailed];
@@ -149,6 +195,8 @@ export type BudgetSummary = {
   /** Sum of spending categories' carryover. */
   carryover: number;
   currentSpend: number;
+  /** Spending in excluded categories: shown, but not part of currentSpend or remaining. */
+  excludedSpend: number;
   /** spendingBudget + carryover − currentSpend. */
   remaining: number;
   /** First month of the carryover tally, or null if there's no history yet. */
@@ -208,7 +256,7 @@ export function summarizeBudget(
   }
 
   const lines: CategoryLine[] = BUDGET_CATEGORIES.map((c) => {
-    const budgeted = amounts.get(c.id) ?? null;
+    const budgeted = isExcluded(c.id) ? null : (amounts.get(c.id) ?? null);
     const act = round2(actual.get(c.id) ?? 0);
     const carryover = budgeted === null ? null : (carry.get(c.id) ?? null);
     return {
@@ -228,6 +276,7 @@ export function summarizeBudget(
   const spendingBudget = round2(spending.reduce((s, l) => s + (l.budgeted ?? 0), 0));
   const carryover = round2(spending.reduce((s, l) => s + (l.carryover ?? 0), 0));
   const currentSpend = round2(spending.reduce((s, l) => s + l.actual, 0));
+  const excludedSpend = round2(lines.filter((l) => l.group === "excluded").reduce((s, l) => s + l.actual, 0));
   const budgetOf = (id: CategoryId) => amounts.get(id) ?? 0;
   const isCurrent = month === monthOf(today);
   return {
@@ -237,6 +286,7 @@ export function summarizeBudget(
     spendingBudget,
     carryover,
     currentSpend,
+    excludedSpend,
     remaining: round2(spendingBudget + carryover - currentSpend),
     trackingStart,
     leftForSavings: round2(budgetOf("earnings") - budgetOf("bills") - spendingBudget),
@@ -322,7 +372,7 @@ export function carryoverInto(
 ): Map<CategoryId, number> {
   const carry = new Map<CategoryId, number>();
   if (start === null || month < start) return carry;
-  for (const c of BUDGET_CATEGORIES) if (c.id !== "earnings") carry.set(c.id, 0);
+  for (const c of BUDGET_CATEGORIES) if (c.id !== "earnings" && !isExcluded(c.id)) carry.set(c.id, 0);
   for (let m = start; m < month; m = addMonths(m, 1)) {
     const budgets = budgetsFor(entries, m);
     for (const id of carry.keys()) {
@@ -353,7 +403,7 @@ export type BudgetFormResult =
 export function parseBudgetForm(form: { get(name: string): unknown }): BudgetFormResult {
   const amounts = new Map<CategoryId, number | null>();
   const invalid: CategoryId[] = [];
-  for (const id of CATEGORY_IDS) {
+  for (const id of BUDGETABLE_IDS) {
     const raw = form.get(BUDGET_FIELD_PREFIX + id);
     if (typeof raw !== "string") {
       invalid.push(id);
