@@ -97,6 +97,14 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   - **Manual categories** (`CategorySelect.tsx`, `setTransactionCategory` action): every transaction in the Budgets breakdown has a dropdown with "Automatic: <category>", each budget category, and "Not budgeted" (`transfer`). A choice is stored as an override with `source: "manual"` and beats every rule. "Automatic" deletes the override. The Amazon import never replaces a manual override. `parseCategoryChoice` accepts only a canonical positive integer id plus `auto` or a known assignment; anything else is a no-op. Pending rows are disabled, because Plaid replaces a pending transaction with a new id when it posts, which would cascade the override away.
   - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page, as rows from `2000-01`. Real amounts never go in code, fixtures or commits.
 
+## Local LLM classification eval (`web/scripts/eval-classifier.ts`, pure logic in `src/lib/classify-eval.ts`)
+
+- `npm run eval:classify -- --env .env.prod [--model qwen3:0.6b] [--holdout 0.2] [--seed v1] [--limit N]`. Needs Ollama running and the model pulled (`ollama pull qwen3:0.6b`). Runs with `--conditions=react-server` so `server-only` imports resolve outside Next.
+- Gold labels are `categorize()` output (overrides, descriptor rules, Plaid category). The model sees only descriptor, merchant, amount/direction and account type, never Plaid's category.
+- Holdout membership is `sha256(seed:id) < fraction` per row, so it's stable as new rows sync and can't leak into a future train/few-shot set. Change `--seed` only to deliberately draw a new split.
+- Ollama must be loopback (`assertLoopbackUrl`): prompts contain real descriptors. Decoding is constrained to the label enum via `format` (JSON schema); `think: false` for Qwen3.
+- Stdout is aggregate metrics only. Per-row predictions go to `web/eval-results/` (gitignored, 0600). Never commit them.
+
 ## Testing gotchas
 
 - `beforeEach(() => mock.mockReset())` *returns* the mock, and Vitest runs a function returned from `beforeEach` as a cleanup hook, which calls your mock after every test. Always use braces: `beforeEach(() => { ... })`.
