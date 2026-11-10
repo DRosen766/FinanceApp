@@ -97,6 +97,16 @@ Next.js 16 differs from older versions: middleware is now `src/proxy.ts`, for ex
   - **Manual categories** (`CategorySelect.tsx`, `setTransactionCategory` action): every transaction in the Budgets breakdown has a dropdown with "Automatic: <category>", each budget category, and "Not budgeted" (`transfer`). A choice is stored as an override with `source: "manual"` and beats every rule. "Automatic" deletes the override. The Amazon import never replaces a manual override. `parseCategoryChoice` accepts only a canonical positive integer id plus `auto` or a known assignment; anything else is a no-op. Pending rows are disabled, because Plaid replaces a pending transaction with a new id when it posts, which would cascade the override away.
   - The owner's starting amounts were seeded once into the local DB from a saved Rocket Money page, as rows from `2000-01`. Real amounts never go in code, fixtures or commits.
 
+## Local LLM classification eval (`web/scripts/eval-classifier.ts`, pure logic in `src/lib/classify-eval.ts` and `src/lib/embed-classify.ts`)
+
+- `npm run eval:classify -- --env .env.prod [--backend embed|chat] [--holdout 0.2] [--seed v1]`. Needs Ollama running and the models pulled (`ollama pull qwen3-embedding:0.6b`, `ollama pull qwen3:0.6b`). Runs with `--conditions=react-server` so `server-only` imports resolve outside Next.
+- `--backend embed` (default, "System 1"): one encoder pass per row (`--embed-model`, default `qwen3-embedding:0.6b`, with the model family's instruction prefix), then three heads on frozen embeddings: zero-shot nearest category description, cosine-weighted kNN (`--k`, default 5) over the train split, and a logistic-regression linear probe. Heads are pure and deterministic; never tune their hyperparameters on the holdout (cross-validate on train instead).
+- `--backend chat`: a chat model (`--model`, default `qwen3:0.6b`) generates the label (`--concurrency`, `--limit`).
+- Gold labels are `categorize()` output (overrides, descriptor rules, Plaid category). The model sees only descriptor, merchant, amount/direction and account type, never Plaid's category.
+- Holdout membership is `sha256(seed:id) < fraction` per row, so it's stable as new rows sync and can't leak into a future train/few-shot set. Change `--seed` only to deliberately draw a new split.
+- Ollama must be loopback (`assertLoopbackUrl`): prompts contain real descriptors. Decoding is constrained to the label enum via `format` (JSON schema); `think: false` for Qwen3.
+- Stdout is aggregate metrics only. Per-row predictions go to `web/eval-results/` (gitignored, 0600). Never commit them.
+
 ## Testing gotchas
 
 - `beforeEach(() => mock.mockReset())` *returns* the mock, and Vitest runs a function returned from `beforeEach` as a cleanup hook, which calls your mock after every test. Always use braces: `beforeEach(() => { ... })`.

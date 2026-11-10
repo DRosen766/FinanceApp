@@ -10,7 +10,8 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "hash-password": "tsx scripts/hash-password.ts"
+    "hash-password": "tsx scripts/hash-password.ts",
+    "eval:classify": "node --conditions=react-server --import tsx scripts/eval-classifier.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",

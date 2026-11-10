@@ -45,3 +45,6 @@ next-env.d.ts
 
 # local SQLite store (contains encrypted Plaid access tokens)
 /data
+
+# local LLM eval output (per-transaction predictions contain real descriptors)
+/eval-results
