@@ -30,6 +30,32 @@ export const isCategoryId = (v: string): v is CategoryId => ID_SET.has(v);
 /** Not budgeted: moves money between your own accounts (or pays a card already counted). */
 export const TRANSFER = "transfer" as const;
 export type Assignment = CategoryId | typeof TRANSFER;
+export const isAssignment = (v: string): v is Assignment => v === TRANSFER || ID_SET.has(v);
+
+/** Dropdown value meaning "no manual choice: use the automatic category". */
+export const AUTO = "auto" as const;
+/** What a transaction's category can be set to by hand, in display order. */
+export const ASSIGNMENT_OPTIONS: readonly { value: Assignment; label: string }[] = [
+  ...BUDGET_CATEGORIES.map((c) => ({ value: c.id, label: c.name })),
+  { value: TRANSFER, label: "Not budgeted" },
+];
+export const assignmentLabel = (a: Assignment): string =>
+  ASSIGNMENT_OPTIONS.find((o) => o.value === a)?.label ?? a;
+
+/**
+ * Parse the manual-category form: a positive integer transaction id and either AUTO (clear the
+ * manual choice) or a known assignment. Anything else is rejected.
+ */
+export function parseCategoryChoice(
+  form: FormData,
+): { id: number; category: Assignment | typeof AUTO } | null {
+  const id = form.get("id");
+  const category = form.get("category");
+  if (typeof id !== "string" || !/^[1-9]\d{0,15}$/.test(id)) return null;
+  if (typeof category !== "string" || (category !== AUTO && !isAssignment(category))) return null;
+  const n = Number(id);
+  return Number.isSafeInteger(n) ? { id: n, category } : null;
+}
 
 // Descriptor rules, checked before Plaid's category. Keep these generic (merchant-level),
 // never tied to the owner's own data.
@@ -84,7 +110,7 @@ const BY_PRIMARY: Record<string, Assignment> = {
  */
 export function categorize(row: TxRow): Assignment | null {
   if (row.kind !== "cash") return null;
-  if (row.budgetCategory && isCategoryId(row.budgetCategory)) return row.budgetCategory;
+  if (row.budgetCategory && isAssignment(row.budgetCategory)) return row.budgetCategory;
   const text = `${row.merchantName ?? ""} ${row.name}`;
   for (const [re, id] of BY_NAME) if (re.test(text)) return id;
   if (row.categoryDetailed && BY_DETAILED[row.categoryDetailed]) return BY_DETAILED[row.categoryDetailed];

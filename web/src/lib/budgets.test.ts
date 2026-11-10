@@ -16,6 +16,9 @@ import {
   parseMonth,
   summarizeBudget,
   TRANSFER,
+  AUTO,
+  ASSIGNMENT_OPTIONS,
+  parseCategoryChoice,
 } from "./budgets";
 import type { TxRow } from "./transactions";
 
@@ -75,6 +78,11 @@ describe("categorize", () => {
     expect(categorize(r)).toBe("groceries");
     // An unknown override id is ignored rather than trusted.
     expect(categorize({ ...r, budgetCategory: "bogus" })).toBe("shopping");
+  });
+
+  it("honors a manual Not budgeted override", () => {
+    const r = cash("2026-11-01", 10, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT", { budgetCategory: "transfer" });
+    expect(categorize(r)).toBe(TRANSFER);
   });
 
   it("counts Amazon delivery tips as groceries", () => {
@@ -327,5 +335,25 @@ describe("parseBudgetForm", () => {
   it("ignores unknown fields, so a forged field never creates a category", () => {
     const r = parseBudgetForm(form({ budget_evil: "5", "budget___proto__": "5" }));
     expect(r.ok && [...r.amounts.keys()].every((k) => CATEGORY_IDS.includes(k))).toBe(true);
+  });
+});
+
+describe("parseCategoryChoice", () => {
+  const f = (id: string, category: string) => {
+    const d = new FormData();
+    d.set("id", id);
+    d.set("category", category);
+    return d;
+  };
+  it("accepts every option plus Automatic", () => {
+    for (const o of ASSIGNMENT_OPTIONS) expect(parseCategoryChoice(f("7", o.value))).toEqual({ id: 7, category: o.value });
+    expect(parseCategoryChoice(f("7", AUTO))).toEqual({ id: 7, category: AUTO });
+    expect(ASSIGNMENT_OPTIONS.map((o) => o.value)).toContain(TRANSFER);
+  });
+  it("rejects anything else", () => {
+    expect(parseCategoryChoice(f("7", "constructor"))).toBeNull();
+    expect(parseCategoryChoice(f("07", "dining"))).toBeNull();
+    expect(parseCategoryChoice(f("1e3", "dining"))).toBeNull();
+    expect(parseCategoryChoice(new FormData())).toBeNull();
   });
 });

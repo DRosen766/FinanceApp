@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listTransactions: vi.fn(),
   setCategoryOverrides: vi.fn(),
+  listCategoryOverrides: vi.fn(() => new Map()),
+  deleteCategoryOverride: vi.fn(),
   revalidatePath: vi.fn(),
   redirect: vi.fn((url: string) => {
     throw new Error(`NEXT_REDIRECT ${url}`);
@@ -20,11 +22,13 @@ vi.mock("@/server/db", () => ({
   listAccounts: mocks.listAccounts,
   listTransactions: mocks.listTransactions,
   setCategoryOverrides: mocks.setCategoryOverrides,
+  listCategoryOverrides: mocks.listCategoryOverrides,
+  deleteCategoryOverride: mocks.deleteCategoryOverride,
 }));
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 
-import { importAmazonOrders, saveBudgets } from "./actions";
+import { importAmazonOrders, saveBudgets, setTransactionCategory } from "./actions";
 
 function form(values: Record<string, string>) {
   const f = new FormData();
@@ -109,10 +113,74 @@ describe("importAmazonOrders server action", () => {
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/budgets");
   });
 
+  it("never replaces a category set by hand", async () => {
+    mocks.requireSession.mockResolvedValue(undefined);
+    mocks.listAccounts.mockReturnValue([{ id: 1, mask: "1111" }]);
+    const t = (id: number, date: string, amount: number) => ({ id, accountId: 1, date, amount, pending: false, name: "AMAZON", merchantName: "Amazon" });
+    mocks.listTransactions.mockReturnValue([t(10, "2026-11-03", 7), t(11, "2026-11-02", 63.45)]);
+    mocks.listCategoryOverrides.mockReturnValue(new Map([[11, { category: "shopping", source: "manual" }]]));
+    mocks.setCategoryOverrides.mockImplementation((m: Map<number, unknown>) => m.size);
+    await importAmazonOrders(importForm(page)).catch(() => {});
+    const written = mocks.setCategoryOverrides.mock.calls[0][0] as Map<number, unknown>;
+    expect([...written.keys()]).toEqual([10]);
+  });
+
   it("rejects empty or oversized input", async () => {
     mocks.requireSession.mockResolvedValue(undefined);
     await expect(importAmazonOrders(importForm("  "))).rejects.toThrow("amz=invalid");
     await expect(importAmazonOrders(importForm("x".repeat(500_001)))).rejects.toThrow("amz=invalid");
     expect(mocks.setCategoryOverrides).not.toHaveBeenCalled();
+  });
+});
+
+describe("setTransactionCategory server action", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  const choice = (id: string, category: string) => {
+    const f = new FormData();
+    f.set("id", id);
+    f.set("category", category);
+    return f;
+  };
+
+  it("does nothing without a session", async () => {
+    mocks.requireSession.mockRejectedValue(new Error("NEXT_REDIRECT /login"));
+    await expect(setTransactionCategory(choice("5", "dining"))).rejects.toThrow("/login");
+    expect(mocks.setCategoryOverrides).not.toHaveBeenCalled();
+    expect(mocks.deleteCategoryOverride).not.toHaveBeenCalled();
+  });
+
+  it("stores a manual category, including Not budgeted", async () => {
+    mocks.requireSession.mockResolvedValue(undefined);
+    await setTransactionCategory(choice("5", "travel"));
+    await setTransactionCategory(choice("6", "transfer"));
+    expect(mocks.setCategoryOverrides.mock.calls).toEqual([
+      [new Map([[5, { category: "travel", source: "manual" }]])],
+      [new Map([[6, { category: "transfer", source: "manual" }]])],
+    ]);
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/budgets");
+  });
+
+  it("clears the manual category on Automatic", async () => {
+    mocks.requireSession.mockResolvedValue(undefined);
+    await setTransactionCategory(choice("5", "auto"));
+    expect(mocks.deleteCategoryOverride).toHaveBeenCalledWith(5);
+    expect(mocks.setCategoryOverrides).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["0", "dining"],
+    ["-1", "dining"],
+    ["1.5", "dining"],
+    ["99999999999999999", "dining"],
+    ["5", "bogus"],
+    ["5", "__proto__"],
+    ["5", ""],
+  ])("ignores invalid input id=%s category=%s", async (id, category) => {
+    mocks.requireSession.mockResolvedValue(undefined);
+    await setTransactionCategory(choice(id, category));
+    expect(mocks.setCategoryOverrides).not.toHaveBeenCalled();
+    expect(mocks.deleteCategoryOverride).not.toHaveBeenCalled();
   });
 });

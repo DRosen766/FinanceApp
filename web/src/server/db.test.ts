@@ -363,4 +363,18 @@ describe("category overrides", () => {
     db.applyTransactionSync(itemId, syncResult({ added: [], removed: [plaidId], nextCursor: "c3" }));
     expect(db.listCategoryOverrides().size).toBe(0);
   });
+
+  it("replaces and deletes a manual override by internal id", async () => {
+    const db = await loadDb();
+    db.saveItem("item-1", "access-sandbox-1", "Test Bank");
+    db.applyTransactionSync(db.listItems()[0].id, syncResult());
+    const txId = db.listTransactions()[0].id;
+    db.setCategoryOverrides(new Map([[txId, { category: "groceries", source: "amazon" as const }]]));
+    db.setCategoryOverrides(new Map([[txId, { category: "transfer", source: "manual" as const }]]));
+    expect(db.listCategoryOverrides().get(txId)).toEqual({ category: "transfer", source: "manual" });
+    expect(db.deleteCategoryOverride(txId)).toBe(true);
+    expect(db.deleteCategoryOverride(txId)).toBe(false);
+    expect(db.deleteCategoryOverride(99999)).toBe(false);
+    expect(db.listCategoryOverrides().size).toBe(0);
+  });
 });
