@@ -19,6 +19,7 @@ import {
   AUTO,
   ASSIGNMENT_OPTIONS,
   parseCategoryChoice,
+  BUDGETABLE_IDS,
 } from "./budgets";
 import type { TxRow } from "./transactions";
 
@@ -319,7 +320,7 @@ describe("parseBudgetForm", () => {
     expect(r.amounts.get("dining")).toBe(1250.5);
     expect(r.amounts.get("shopping")).toBe(300);
     expect(r.amounts.get("groceries")).toBeNull();
-    expect(r.amounts.size).toBe(CATEGORY_IDS.length);
+    expect(r.amounts.size).toBe(BUDGETABLE_IDS.length);
   });
 
   it.each(["-5", "1.234", "abc", "1e5", "Infinity", "99999999999", "0x10", "1 000"])("rejects %s", (v) => {
@@ -355,5 +356,45 @@ describe("parseCategoryChoice", () => {
     expect(parseCategoryChoice(f("07", "dining"))).toBeNull();
     expect(parseCategoryChoice(f("1e3", "dining"))).toBeNull();
     expect(parseCategoryChoice(new FormData())).toBeNull();
+  });
+});
+
+describe("excluded categories", () => {
+  it("Education is excluded and Plaid's education category maps to it", () => {
+    expect(BUDGET_CATEGORIES.find((c) => c.id === "education")?.group).toBe("excluded");
+    expect(BUDGETABLE_IDS).not.toContain("education");
+    expect(categorize(cash("2026-11-01", 40, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"))).toBe("education");
+    expect(categorize(cash("2026-11-01", 40, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT", { budgetCategory: "education" }))).toBe("education");
+  });
+
+  it("are listed but never budgeted, carried over, or counted as spending", () => {
+    const rows = [
+      cash("2026-10-05", 100, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"),
+      cash("2026-11-02", 50, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"),
+      cash("2026-11-03", 400, "GENERAL_SERVICES", "GENERAL_SERVICES_EDUCATION"),
+    ];
+    // Even a stray stored budget for an excluded category is ignored.
+    const entries: BudgetEntry[] = [
+      { category: "dining", fromMonth: "2000-01", amount: 200 },
+      { category: "education", fromMonth: "2000-01", amount: 1000 },
+    ];
+    const s = summarizeBudget(rows, "2026-11", entries, TODAY, "2026-08-01", "2026-09");
+    const edu = s.lines.find((l) => l.id === "education")!;
+    expect(edu).toMatchObject({ group: "excluded", actual: 400, budgeted: null, carryover: null, remaining: null });
+    expect(edu.rows).toHaveLength(1);
+    expect(s.excludedSpend).toBe(400);
+    expect(s.currentSpend).toBe(50);
+    expect(s.spendingBudget).toBe(200);
+    expect(s.carryover).toBe(400); // dining only: Sep 200 + Oct 200 unspent
+    expect(s.remaining).toBe(550);
+    expect(carryoverInto(monthlyActuals(rows), entries, "2026-09", "2026-11").has("education")).toBe(false);
+  });
+
+  it("have no budget field: the form ignores one if sent", () => {
+    const m = new Map<string, string>();
+    for (const id of BUDGETABLE_IDS) m.set(BUDGET_FIELD_PREFIX + id, "");
+    m.set(BUDGET_FIELD_PREFIX + "education", "500");
+    const r = parseBudgetForm({ get: (n: string) => m.get(n) ?? null });
+    expect(r.ok && r.amounts.has("education")).toBe(false);
   });
 });

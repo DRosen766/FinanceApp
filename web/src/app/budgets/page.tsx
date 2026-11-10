@@ -102,6 +102,22 @@ function automatic(t: TxRow): string {
   return t.budgetCategorySource === "amazon" ? `${assignmentLabel(a)} (Amazon order)` : assignmentLabel(a);
 }
 
+/** Excluded categories: actual spending only; no budget field, carryover or remaining. */
+function ExcludedRow({ line }: { line: CategoryLine }) {
+  return (
+    <tr>
+      <td>
+        <a href={`#cat-${line.id}`}>{line.name}</a>
+      </td>
+      <td className="num muted">—</td>
+      <td className="num muted">—</td>
+      <td className="num nowrap">{money(line.actual)}</td>
+      <td className="num muted">—</td>
+      <td className="num nowrap muted">{line.avg3 === null ? "—" : money(line.avg3)}</td>
+    </tr>
+  );
+}
+
 function TxTable({ rows, accountName }: { rows: TxRow[]; accountName: (id: number) => string }) {
   return (
     <div className="table-scroll">
@@ -244,6 +260,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
 
   const basics = summary.lines.filter((l) => l.group === "basics");
   const spending = summary.lines.filter((l) => l.group === "spending");
+  const excluded = summary.lines.filter((l) => l.group === "excluded");
   const nextMonth = addMonths(month, 1);
   const canGoNext = nextMonth <= addMonths(monthOf(today), 1);
   const perDay =
@@ -367,6 +384,22 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
                   <td />
                 </tr>
               </tbody>
+              {excluded.length > 0 && (
+                <>
+                  <thead>
+                    <tr>
+                      <th colSpan={6} title="No budget, and not counted in current spend or what's left to spend">
+                        Excluded from budget
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {excluded.map((l) => (
+                      <ExcludedRow key={l.id} line={l} />
+                    ))}
+                  </tbody>
+                </>
+              )}
             </table>
           </div>
           <div className="row form-actions">
@@ -387,6 +420,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
               <span className="muted small">
                 {l.rows.length} {l.rows.length === 1 ? "transaction" : "transactions"} · {money(l.actual)}{" "}
                 {l.id === "earnings" ? "received" : "spent"}
+                {l.group === "excluded" && " · excluded from budget"}
               </span>
             </summary>
             {l.rows.length ? (
@@ -417,7 +451,9 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
         {summary.trackingStart
           ? `Carryover is a running tally since ${monthLabel(summary.trackingStart)}, the first full month with history from every linked account: each month's unspent budget rolls forward, and overspending rolls forward as a deficit. `
           : "Carryover starts once transactions have synced. "}
-        Categories come from Plaid&apos;s category on each transaction; change any one with its
+        Excluded categories (such as Education) are tracked here but have no budget and don&apos;t
+        count toward current spend or what&apos;s left to spend. Categories come from Plaid&apos;s
+        category on each transaction; change any one with its
         dropdown, and your choice sticks through syncs and Amazon imports. Card purchases count as
         spending, so credit card payments and transfers between your own accounts are not budgeted.
         Refunds reduce their category&apos;s spending. Pending transactions are included. Activity
