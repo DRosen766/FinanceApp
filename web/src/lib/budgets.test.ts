@@ -265,14 +265,27 @@ describe("carryover", () => {
   ];
   const actuals = monthlyActuals(rows);
 
-  it("keeps a running tally from the start month, both directions", () => {
+  it("carries overspending forward as a deficit, but never unspent budget", () => {
     const into = (m: string) => carryoverInto(actuals, entries, "2026-09", m);
     expect(into("2026-09").get("dining")).toBe(0);
-    expect(into("2026-10").get("dining")).toBe(50);
-    expect(into("2026-10").get("shopping")).toBe(-60);
-    expect(into("2026-11").get("dining")).toBe(30); // 50 + (300 − 320)
-    expect(into("2026-11").get("shopping")).toBe(50); // −60 + (100 + 10)
-    expect(into("2026-12").get("dining")).toBe(290); // November so far: 300 − 40
+    expect(into("2026-10").get("dining")).toBe(0); // 50 unspent: not carried
+    expect(into("2026-10").get("shopping")).toBe(-60); // overspent: carried
+    expect(into("2026-11").get("dining")).toBe(-20); // 0 + (300 − 320)
+    expect(into("2026-11").get("shopping")).toBe(0); // −60 + 110 pays it off; the extra 50 is not carried
+    expect(into("2026-12").get("dining")).toBe(0); // −20 + (300 − 40) → capped at 0
+    for (const m of ["2026-10", "2026-11", "2026-12"]) for (const v of into(m).values()) expect(v).toBeLessThanOrEqual(0);
+  });
+
+  it("pays a deficit back over several months", () => {
+    const e: BudgetEntry[] = [{ category: "dining", fromMonth: "2000-01", amount: 100 }];
+    const a = monthlyActuals([
+      cash("2026-09-10", 400, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // −300
+      cash("2026-10-10", 50, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // +50 → −250
+      cash("2026-11-10", 0.5, "FOOD_AND_DRINK", "FOOD_AND_DRINK_RESTAURANT"), // +99.5 → −150.5
+    ]);
+    expect(carryoverInto(a, e, "2026-09", "2026-10").get("dining")).toBe(-300);
+    expect(carryoverInto(a, e, "2026-09", "2026-11").get("dining")).toBe(-250);
+    expect(carryoverInto(a, e, "2026-09", "2026-12").get("dining")).toBe(-150.5);
   });
 
   it("has no carryover for Earnings, before the start, or without history", () => {
@@ -286,15 +299,16 @@ describe("carryover", () => {
     expect(groceries).toBe(0);
   });
 
-  it("feeds the month view: remaining includes carryover", () => {
+  it("feeds the month view: a deficit lowers remaining, and spendable never exceeds the budget", () => {
     const s = summarizeBudget(rows, "2026-11", entries, TODAY, "2026-08-15", "2026-09");
     const dining = s.lines.find((l) => l.id === "dining")!;
-    expect(dining.carryover).toBe(30);
-    expect(dining.remaining).toBe(300 + 30 - 40);
+    expect(dining.carryover).toBe(-20);
+    expect(dining.remaining).toBe(300 - 20 - 40);
+    expect(s.lines.find((l) => l.id === "shopping")!.remaining).toBe(100); // not 150
     expect(s.lines.find((l) => l.id === "earnings")!.carryover).toBeNull();
     expect(s.lines.find((l) => l.id === "groceries")!.carryover).toBeNull(); // no budget
-    expect(s.carryover).toBe(80); // dining 30 + shopping 50
-    expect(s.remaining).toBe(400 + 80 - 40);
+    expect(s.carryover).toBe(-20); // dining −20 + shopping 0
+    expect(s.remaining).toBe(400 - 20 - 40);
     expect(s.trackingStart).toBe("2026-09");
   });
 
@@ -385,8 +399,8 @@ describe("excluded categories", () => {
     expect(s.excludedSpend).toBe(400);
     expect(s.currentSpend).toBe(50);
     expect(s.spendingBudget).toBe(200);
-    expect(s.carryover).toBe(400); // dining only: Sep 200 + Oct 200 unspent
-    expect(s.remaining).toBe(550);
+    expect(s.carryover).toBe(0); // dining underspent: nothing rolls over
+    expect(s.remaining).toBe(150);
     expect(carryoverInto(monthlyActuals(rows), entries, "2026-09", "2026-11").has("education")).toBe(false);
   });
 

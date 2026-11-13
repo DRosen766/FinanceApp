@@ -176,7 +176,7 @@ export type CategoryLine = {
   /** Spending categories: net money out. Earnings: net money in. Refunds reduce spending. */
   actual: number;
   /**
-   * Running tally carried in from earlier months (unspent budget +, overspending −); null
+   * Deficit carried in from earlier overspending (≤ 0; unspent budget doesn't roll over); null
    * for Earnings, without a budget this month, or before carryover tracking starts.
    */
   carryover: number | null;
@@ -360,8 +360,10 @@ export function monthlyActuals(rows: TxRow[]): Map<Month, Map<CategoryId, number
 }
 
 /**
- * Carryover into `month` per expense category: the running sum of (budget − actual) over
- * every month from `start` up to, not including, `month`. A month without a budget for a
+ * Carryover into `month` per expense category: overspending carries forward as a deficit
+ * (≤ 0) until later underspending pays it back; unspent budget does NOT roll forward, so a
+ * month never has more to spend than its own budget. Each month from `start` up to, not
+ * including, `month`: carry = min(0, carry + budget − actual). A month without a budget for a
  * category leaves its tally unchanged. Earnings has no carryover. Empty before `start`.
  */
 export function carryoverInto(
@@ -378,7 +380,7 @@ export function carryoverInto(
     for (const id of carry.keys()) {
       const b = budgets.get(id);
       if (b === undefined) continue;
-      carry.set(id, carry.get(id)! + b - (actuals.get(m)?.get(id) ?? 0));
+      carry.set(id, Math.min(0, carry.get(id)! + b - (actuals.get(m)?.get(id) ?? 0)));
     }
   }
   for (const [id, v] of carry) carry.set(id, round2(v));
