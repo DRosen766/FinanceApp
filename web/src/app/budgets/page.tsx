@@ -347,7 +347,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
                 <tr>
                   <th>Budget basics</th>
                   <th className="num">Budgeted / mo</th>
-                  <th className="num" title="Running tally of unspent (+) or overspent (−) budget from earlier months">
+                  <th className="num" title="Overspending from earlier months not yet paid back (unspent budget doesn't roll over)">
                     Carryover
                   </th>
                   <th className="num">Actual</th>
@@ -449,7 +449,7 @@ export default async function BudgetsPage({ searchParams }: PageProps<"/budgets"
 
       <p className="footnote muted">
         {summary.trackingStart
-          ? `Carryover is a running tally since ${monthLabel(summary.trackingStart)}, the first full month with history from every linked account: each month's unspent budget rolls forward, and overspending rolls forward as a deficit. `
+          ? `Carryover is a running tally since ${monthLabel(summary.trackingStart)}, the first full month with history from every linked account: overspending rolls forward as a deficit until later months pay it back, but unspent budget doesn't roll over, so a month never has more to spend than its budget. `
           : "Carryover starts once transactions have synced. "}
         Excluded categories (such as Education) are tracked here but have no budget and don&apos;t
         count toward current spend or what&apos;s left to spend. Categories come from Plaid&apos;s
